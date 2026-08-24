@@ -7,7 +7,7 @@ import sys
 import maya.OpenMayaMPx as omp
 
 PLUGIN_VENDOR = "mh2max"
-PLUGIN_VERSION = "1.3.2"
+PLUGIN_VERSION = "1.3.3"
 
 
 def initializePlugin(mobject):

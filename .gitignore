@@ -61,3 +61,9 @@ mh2max.local.mod
 
 # Local dev helper (machine-specific paths)
 run_character.py
+
+# Vendor bundles (large; GitHub Release only)
+vendor/*.zip
+vendor/*.7z
+!vendor/README-VENDOR.txt
+!vendor/MetaHumanForMaya.mod

@@ -10,11 +10,18 @@ from maya import cmds
 from .assemble import assemble_character, find_assets, open_assembled
 from .detect import default_output_dir, detect_scene
 from .export_maya import dump_limits, export_character_fbx, export_morphs, write_job_files
-from .launch_max import find_3dsmax_info, launch_max, expected_max_save_paths
+from .launch_max import (
+    expected_max_save_paths,
+    find_3dsmax_info,
+    find_all_3dsmax,
+    get_max_exe,
+    launch_max,
+    set_preferred_max,
+)
 from .progress_ui import ProgressUI, end_busy, show_busy
 
 
-def run_export(out_dir=None, launch=True, face_only=True, progress_ui=None, info=None):
+def run_export(out_dir=None, launch=True, face_only=True, progress_ui=None, info=None, max_exe=None):
     """Export FBX + morphs + job files; show foreground ProgressUI throughout."""
     info = info or detect_scene()
     if not info.get("ok"):
@@ -106,7 +113,7 @@ def run_export(out_dir=None, launch=True, face_only=True, progress_ui=None, info
         if launch:
             ui.event(u"正在启动 3ds Max 并自动装配…")
             ui.raise_window()
-            exe = launch_max(job_ms)
+            exe = launch_max(job_ms, max_exe=max_exe)
             ui.log(u"已启动：%s" % (exe or u"（未知）"))
         else:
             ui.event(u"跳过启动 Max（未找到可执行文件）")
@@ -181,6 +188,44 @@ def _ensure_assembled(assets=None):
     return info
 
 
+def _pick_max_for_export(max_info):
+    """When multiple Max installs exist, let user pick export target."""
+    installs = find_all_3dsmax()
+    if len(installs) <= 1:
+        return max_info
+    from maya import cmds
+
+    cur_exe = (max_info or {}).get("exe") or get_max_exe()
+    lines = [u"检测到多个 3ds Max，请选择「一键导出」使用的版本：", u""]
+    for i, item in enumerate(installs, 1):
+        mark = u" ← 当前" if cur_exe and item.get("exe") == cur_exe else u""
+        lines.append(u"  %s. 3ds Max %s%s" % (i, item.get("version"), mark))
+    lines.append(u"")
+    lines.append(u"输入序号后确定（留空=使用当前默认）。")
+    result = cmds.promptDialog(
+        title=u"选择 3ds Max 导出版本",
+        message=u"\n".join(lines),
+        button=[u"确定", u"取消"],
+        defaultButton=u"确定",
+        cancelButton=u"取消",
+        dismissString=u"取消",
+        text="1",
+    )
+    if result != u"确定":
+        return max_info
+    raw = (cmds.promptDialog(query=True, text=True) or "").strip()
+    if not raw:
+        return max_info
+    if not raw.isdigit():
+        return max_info
+    idx = int(raw)
+    if idx < 1 or idx > len(installs):
+        return max_info
+    picked = installs[idx - 1]
+    set_preferred_max(picked["exe"])
+    return {"exe": picked["exe"], "version": picked["version"]}
+
+
 def run_export_ui():
     # Instant feedback — close leftover blank native progress / old import win
     end_busy()
@@ -196,6 +241,8 @@ def run_export_ui():
     body = info.get("body_type") or "unknown"
     char = info.get("character") or "MetaHuman"
     max_info = find_3dsmax_info()
+    if len(find_all_3dsmax()) > 1:
+        max_info = _pick_max_for_export(max_info)
     max_exe = max_info.get("exe") or u"（未找到 3ds Max，将只导出文件）"
     max_ver = max_info.get("version") or "?"
     save_paths = expected_max_save_paths(char, out_dir, max_info.get("version") or 0)
@@ -245,7 +292,12 @@ def run_export_ui():
     launch = bool(max_info.get("exe"))
     try:
         result = run_export(
-            out_dir=out_dir, launch=launch, face_only=True, progress_ui=ui, info=info
+            out_dir=out_dir,
+            launch=launch,
+            face_only=True,
+            progress_ui=ui,
+            info=info,
+            max_exe=max_info.get("exe"),
         )
         save_paths = expected_max_save_paths(char, out_dir, max_info.get("version") or 0)
         done = (

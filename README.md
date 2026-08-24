@@ -4,7 +4,17 @@ MetaHuman 面部一键导出与 3ds Max 装配管线：**Maya 导入 → Morph �
 
 > **Alpha 版本**：API 与行为可能变更；请在测试项目中验证后再用于生产。
 
-**当前版本：1.3.2** · 目标环境：Maya 2022+ / 3ds Max 2022+（开发测试：Maya 2026 + Max 2026）
+**当前版本：1.3.3** · 目标环境：Maya 2022+ / 3ds Max 2022+（开发测试：Maya 2026 + Max 2026）
+
+## 一键安装（推荐）
+
+1. 克隆或解压本仓库到任意路径（支持中文路径）
+2. 从 [Releases](https://github.com/Elijah-Neverdie/mh2max/releases) 下载 `MetaHumanForMaya-1.3.1-win64.zip` → 放入 `vendor/`
+3. 双击 **`install.bat`**
+   - 扫描 Maya / Max 版本，默认全部安装
+   - 未检测到时支持粘贴 `.lnk` 快捷方式（多层嵌套）或 exe 路径
+   - 多 Max 版本时可选择默认导出版本
+   - 配置写入 `%LOCALAPPDATA%\mh2max\config.json`
 
 ## 功能
 
@@ -22,11 +32,11 @@ MetaHuman 面部一键导出与 3ds Max 装配管线：**Maya 导入 → Morph �
 | **MetaHuman 角色包** | DCC Export zip 或已装配 `.mb` | 业务数据 |
 | **Quixel DHI / MSLiveLink**（可选） | 旧版 SourceAssets 自动装配 | 仅 legacy DHI，非 UE 5.8 zip |
 
-本仓库**不包含** Epic MetaHuman for Maya、Quixel DHI 或任何角色资产（受许可限制）。
+本仓库 Git 内**不含**约 1.5GB 的 MetaHumanForMaya 压缩包；请从 **Releases** 下载。`.mod` 参考文件见 `vendor/MetaHumanForMaya.mod`。
 
 Maya 侧无 pip 依赖；Max 侧使用内置 Morpher / FBX / OBJ，Windows .NET Timer。
 
-## 安装（新机）
+## 安装（手动）
 
 1. 克隆本仓库到任意路径，例如 `D:\Tools\mh2max`
 2. 复制模块描述文件：
@@ -58,7 +68,10 @@ Maya 侧无 pip 依赖；Max 侧使用内置 Morpher / FBX / OBJ，Windows .NET 
 
 ```text
 mh2max/
-├── plug-ins/mh2max.py      # Maya 插件 stub
+├── install.bat               # 一键安装（Maya 模块 + MetaHuman + Max 配置）
+├── tools/                    # 安装脚本 / 快捷方式解析
+├── vendor/                   # MetaHumanForMaya zip（Release 下载）
+├── plug-ins/mh2max.py
 ├── scripts/mh2max/           # Python 包（导入 / 导出 / 检测）
 ├── max/mh2max_pipeline.ms    # Max 一键装配脚本
 ├── mh2max.mod.example        # Maya 模块模板
