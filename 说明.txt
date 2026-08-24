@@ -1,0 +1,48 @@
+mh2max — MetaHuman → 3ds Max
+============================
+
+版本 1.3.2（Maya 2026 / Max 2026）
+
+启动
+- 不再作为启动插件自动 loadPlugin（避免卡在启动屏）
+- 主窗口起来后才安装：文件 > MetaHuman
+- 模块文件：Documents\maya\modules\mh2max.mod → C:\Users\A\Tools\mh2max
+
+菜单
+- 顶栏 **MH2Max**（或 Epic 的 MetaHuman 菜单内）：导入 MH / 导出至 3ds Max / 检测
+- 不再写入「文件」菜单（会破坏 Maya 自带的 buildFileMenu）
+
+若「文件」菜单只剩 MetaHuman：运行 C:\Users\A\Tools\mh2max\reload_menu.py 或重启 Maya
+
+导入 MH（UE 5.8 zip）
+1. 必须先安装 Epic「MetaHuman for Maya」（Fab → 装到 UE → 解压 Content 到 Documents\maya\modules）
+2. 文件 > MetaHuman > 导入 MH，选择如 MC_Test.zip
+3. 进度窗口显示「事件序号/总计」与日志，界面通过 refresh/processEvents 保持可刷新
+4. 解压目录默认：与 zip 同级的 MHI_<zip名>\；若已存在则询问覆盖，或自动用 MHI_xxx_2 等后缀
+5. 装配依赖 Character Assembler；装好插件后可自动/半自动 Assemble，并做眨眼与张嘴-牙齿联动验证
+
+更新菜单（当前 Maya 已开着时）
+在脚本编辑器运行：C:\Users\A\Tools\mh2max\reload_menu.py
+
+注意
+- 不要同时开两个 Maya：dcc-mcp 会抢端口，第二个会卡成「无响应」
+- UE 5.8 zip 不能用旧 DHI CharacterImporter 直接装；需要 MetaHuman for Maya
+
+一键「导出至 3ds Max」面部装配策略（1.3）
+- Maya 侧按 MESH_JOBS 导出全部头部子网格 Morph：Face / Teeth / Saliva（牙龈）/ 眼部等
+- Max 侧对每个子网格独立装 Morpher 并接线 GUI；FACIAL 骨骼保持 FBX 绑定矩阵（不写 Script Controller）
+- 这样张嘴时牙龈随 Morph 运动，同时不会因改骨控制器导致下巴 Skin 坍缩
+- 新增子网格时：改 detect.MESH_JOBS + poses.POSE_JOBS，并同步 Max 的 mh2max_morphMeshJobs 表
+
+姿势保真（1.3.1）
+- 导出 Morph 前强制归零全部滑杆轴：任何遗留姿势都会污染所有烘焙目标（曾导致 Max/Maya 同姿势不同结果）
+- MorphTargets/mh2max_bake.version 版本戳：烘焙逻辑升级时自动清空旧 OBJ 全量重烘，杜绝脏缓存
+- 二维控制器（mouth/jaw/eye 等）每个角落额外烘焙「残差」目标（<ctrl>.comboX?Y?），
+  Max 用 |x|·|y| 双线性权重接线，补上 RigLogic 的非线性角落校正
+
+Max 场景归档（1.3.2）
+- 一键导出不再写单个 `_face_rigged.max`，改为按版本归档：
+  - 当前 Max 年：`{角色}_face_rigged_max{年}.max`（如 _max2026.max）
+  - 若当前 Max > 2024：额外尝试 `_max2024.max`（saveAsVersion:2024；失败则只保留当前版）
+  - 若当前就是 2024：仅写入 `_max2024.max` 一份
+- Max 2026 down-save 前会自动对齐 Gamma/Linear 渲染输出默认（避免颜色管理阻塞弹窗）
