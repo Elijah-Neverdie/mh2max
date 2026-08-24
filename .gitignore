@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+
+# Maya / export artifacts (user data, not plugin source)
+*.mb
+*.ma
+*.fbx
+*.obj
+MaxExport/
+MorphTargets/
+mh2max_run.json
+mh2max_posejobs.json
+mh2max_bake.version
+mh2max_maya.log
+mh2max_max.log
+mh2max_job.json
+mh2max_job.ms
+*_assembled.mb
+*_face_rigged*.max
+*_to_max.fbx
+face_ctrl_limits.txt
+
+# Max dev / MCP debug scripts (not shipped)
+max/_*
+max/mh2max_mcp_*
+max/mh2max_diag_*
+max/mh2max_fix_*
+max/mh2max_repair_*
+max/mh2max_wire_*
+max/mh2max_verify_*
+max/mh2max_ui_recover.ms
+max/mh2max_unify_*
+!max/mh2max_pipeline.ms
+
+# Local screenshots / dev artifacts
+_*.png
+run_character.mel
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local mod override (users copy from .example)
+mh2max.mod
+mh2max.local.mod
+
+# Local dev helper (machine-specific paths)
+run_character.py
