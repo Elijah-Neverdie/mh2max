@@ -1,0 +1,136 @@
+# mh2max 更新日志
+
+## 2026-08-24 — 移除菜单「装配当前角色（DHI）」
+
+- 「导入 MH」已自动装配 UE DCC Export，独立 DHI 装配按钮冗余
+- 菜单保留：导入 MH / 导出至 3ds Max / 检测当前角色
+- 导出流程仍可在未装配场景时自动调用 DHI 装配（`_ensure_assembled`）
+
+## 2026-08-24 — v1.3.2 hotfix：Max 2026 down-save 2024 颜色管理弹窗
+
+- 现象：Max 2026 归档 `_max2024.max` 时弹出「目标版本不支持 Gamma 编码和线性图像模式的不同渲染输出默认值」
+- 原因：2026 将 Render Output Defaults 拆为 #GammaEncoded / #Linear 两套，2024 只支持单一默认值；两者不一致时 saveAsVersion:2024 阻塞
+- 修复：`mh2max_trySaveAs2024` down-save 前临时将两套输出默认对齐为 #NoConversion，保存后恢复原设置；`quiet:true` + `setQuietMode` 抑制参与式对话框
+- 仍失败则仅保留当前版本归档（行为与 v1.3.2 设计一致，记日志不中断管线）
+
+## 2026-08-24 — v1.3.2 一键工作流：角落残差 Morph + Max 双版本归档
+
+- 一键「导出至 3ds Max」已完整纳入 v1.3.1 姿势保真链路（此前代码已就位，本次补齐 UI/任务/文档）：
+  - 导出前 `_zero_all_sliders` 归零全部滑杆
+  - `MORPH_BAKE_VERSION` 版本戳全量重烘
+  - 单轴 Morph + 自动扫描的角落 combo 残差（Maya 烘焙 / Max `wireComboChannel` 双线性接线）
+  - 进度窗与完成对话框显示 combo 导出数量
+- Max 场景保存改为版本归档（替代单一 `_face_rigged.max`）：
+  - `mh2max_saveArchives`：写入 `{角色}_face_rigged_max{当前年}.max`
+  - 当前 Max > 2024 时额外尝试 `_max2024.max`（`saveAsVersion:2024`；不支持则跳过并记日志）
+  - 当前 Max 即为 2024 时仅归档一份 `_max2024.max`
+- Maya 侧 `write_job_files` 传递 `mh2max_saveBase`；Max 管线兼容旧 `mh2max_save` 任务脚本
+
+## 2026-08-21 — v1.3.1 控制器姿势 Max/Maya 不一致的根治（CTRL_C_mouth 左下角等）
+
+- 用户报告：`CTRL_C_mouth` 移到左下角，Max 与 Maya 结果明显不同
+- MCP 量化：Max 单轴 Morph 本身就偏差大（mouth X=-1 唇深 Max 1.606" vs Maya 1.412"，中立位仅差 0.05"）
+- 根因一（主因）：历史导出的单轴 OBJ 是在“非中立姿势”下烘焙的（导出时场景有控制器未归零），
+  skip-if-exists 机制又把这批脏文件永久保留
+  - 修复：`_zero_all_sliders` 导出前强制归零全部 176 个滑杆轴并记日志
+  - 修复：`MORPH_BAKE_VERSION` 版本戳（MorphTargets/mh2max_bake.version），烘焙逻辑升级时自动清空全部旧 OBJ 全量重烘
+- 根因二（次因）：RigLogic 对二维控制器角落姿势有非线性组合校正，Max 线性叠加 X+Y 缺少该项
+  - 修复：`_combo_pairs`/`_export_combo_objs` 对同一控制器 XY 双轴的每个符号组合烘焙“角落残差”目标
+    （残差网格 = 中立 + [角落形变 − X形变 − Y形变]，低于 0.01cm 的组合自动跳过：130 组合中 105 有效）
+  - Max：`parseMorphName` 识别 `<ctrl>.comboX<sx>Y<sy>`，新 `wireComboChannel` 用 |x|·|y| 双线性权重接线
+- 全量重烘 545 项（440 单轴 + 105 角落残差）失败 0；Max 重建 wired=545 failed=0
+- 复测（唇区包围盒，相对中立的形变量）：mouth X-1 / Y-1 / 左下角、jaw 角落均与 Maya 一致，
+  残余 ≈0.04" 为 FBX/OBJ 基线常量差（中立位即存在），非姿势误差
+- 排错记录：首版残差网格误写为 δ 本身（顶点落到原点导致头压毁），已改为 中立+δ 并复测
+
+## 2026-08-21 — MCP 调试：20 个 Morph 失败 + Maya/Max 姿势不一致的根因
+
+- 失败 20 项全部来自舌头控制器：UE 5.8 版 rig 已改名/锁定
+  - `CTRL_C_tongue`、`CTRL_C_tongue_tip` 不存在（改为 `tongue_move`/`tipMove`）
+  - `tongue_roll/inOut/press/thickThin/wideNarrow` 的 X 轴被锁定；`roll.translateY` 限位 [0,1] 不接受 -1
+- 姿势不一致主因：手写 POSE_JOBS 只覆盖 109/176 个滑杆轴，67 个可写轴（嘴角、眼睑、lipsRoll、thickness、teethU/D 等）在 Max 完全无 Morph
+- 修复：`export_maya.build_pose_jobs` 运行时扫描实机 rig（枚举可写滑杆轴 + om2 顶点签名检测每个姿势影响哪些网格），结果缓存 `mh2max_posejobs.json`；静态表仅作回退
+- 扫描 9 秒；重导出 440 项 Morph 失败 0；自动清理过期 OBJ 30 个；Max 重建 wired=440 failed=0
+- Max `buildAndWireMorphs` 支持按需追加 Morpher（Face 192 通道 → 2 个 Morpher）
+- 实测张嘴姿势 Max/Maya 牙齿、牙龈包围盒中心与尺寸完全吻合（误差 <0.01）
+- 已知边界：`nose_wrinkleUpper` 等皱纹控制在 Maya 实测顶点位移为 0（纯法线贴图驱动），几何管线无法也无需复现；RigLogic 组合校正为非线性，Max 线性 Morph 叠加在多控制器组合时存在近似误差
+
+## 2026-08-21 — 一键导出工作流纳入牙龈/子网格 Morph 修复
+
+- Maya：`MESH_JOBS` 为唯一任务表；一键 `face_only` 固定导出 Face/Teeth/Saliva/眼部全部头部子网格
+- Maya：`Saliva` 使用与 Teeth 相同的下颌/舌头姿势集；进度条与完成对话框列出子网格文件夹
+- Max：`mh2max_morphMeshJobs` 表驱动定位网格、分桶目标、清旧 Morpher、接线；与 Maya 表一一对应
+- Max：继续跳过 FACIAL 骨 Script Controller，保护 Skin 绑定，避免下巴坍缩复现
+- 维护约定：新增头部变形网格时同步改 `detect.MESH_JOBS`、`poses.POSE_JOBS`、`mh2max_morphMeshJobs`
+
+## 2026-08-21 — 修复牙龈/Saliva 不随口腔控制器
+
+- Maya/Max MCP 对比确认：`CTRL_C_jaw.translateY=1` 时，Maya 的 `saliva_lod0_mesh` 明显随下颌移动，但 Max 中该网格只有 Skin、没有 Morpher；FACIAL 骨又为保护绑定矩阵而保持静态
+- 不重新驱动 Jaw 骨，避免头/牙已有 Morph 后发生“双重变形”并复现下巴坍缩
+- 导出器新增 `Saliva`，使用 Teeth 的下颌/舌头控制器姿势集；Max 管线新增独立 Saliva Morpher 与控制器接线
+- 同步补齐 EyeLeft、EyeRight、EyeLash、EyeShell、EyeEdge、Cartilage 独立 Morpher，修复同类遗漏
+- 实测 Jaw=0→1：Saliva 中心由 `(-0.0027,-3.6522,60.6156)` 移至 `(0.0098,-3.5110,60.0477)`；Maya 映射目标 Y/Z 为 `(-3.5110,60.0476)`
+- 中性位头部尺寸保持 `[13.7743,9.5584,14.6945]`，FACIAL Script Controller 数量为 0，下巴绑定未被修改
+
+## 2026-08-21 — Maya/Max MCP 逐骨对比并从干净 FBX 重建
+
+- 对比 Maya 639 个 Skin influence 与 Max 同名骨，确认坐标映射为 `(X, -Z, Y) × 0.3937`
+- 当前坏场景不只是 Jaw：下唇、下牙、舌链世界矩阵均已偏离 Maya 绑定，继续改欧拉角无法可靠恢复
+- 先备份坏场景，再从 Maya 导出的原始 FBX 全量重建 Max
+- 管线禁用所有 FACIAL 骨 Script Controller，完整保留 FBX 导入的 Maya 绑定矩阵
+- 实测位置吻合：`LipLower Max=(0.0078,-4.7105,60.2063)`，对应 Maya `(0.0198,152.9241,11.9647)`
+- MCP 视口截图确认：嘴、下巴、下牙和舌头均恢复，无黑洞和拉刺
+
+## 2026-08-21 — 嘴巴黑洞：错误强制 bind=-40
+
+- 对照 Skin 关闭的网格：Jaw/LLR 真实休息角约 **±180°**，不是 -40°
+- -40° 时 `LipLower` 世界 Y≈+1.7（缩进颅内），上唇 Y≈-4.8 → 正面看大口洞
+- ±180° 时下唇回到 Y≈-2.5，洞闭合；已按探测 `sBind≈-269.7` 重接
+- 管线去掉“强制 -40”逻辑，改为只用当前显示角 + D0 探测
+
+## 2026-08-21 — MCP：头顶刺 + 下巴塌（TeethLower 位移脚本）
+
+- 视口刺：`FACIAL_C_TeethLower` Y/Z 残留 `float_script`，世界坐标飞到 ≈(15, 80)，舌头子级跟随；`teeth_lod0_mesh` maxZ≈80
+- 已清：强制 `prs.position = Position_XYZ(0,0,0)` 复位牙/舌链；上牙恢复原世界位
+- 策略：**只接 Jaw + LowerLipRotation**（探测 `sBind`）；牙/舌/眼睑骨驱动暂时关闭（Morph 仍可用）
+- 验证：chin 休息正常；张嘴 jawX -40→-19；牙齿 mesh maxZ≈62.4
+
+## 2026-08-21 — 下巴坍缩真因：float_script 角度空间探测
+
+- 现象：休息姿势下颌仍塌；硬写 `bind=-130` 或用「度数」当脚本输出都会坏 Skin
+- 实测：Euler 轴上的 `float_script` 返回的是**弧度**，且 `display ≈ D0 + rad2deg(script)`（`D0` 因骨而异；Jaw 上 `D0≈90`）
+- Skin 休息显示角是 **-40°**，不是把控制器设成 -130；`degToRad(-130)` 才会显示成 -40 且矩阵与 bezier(-40) 一致
+- 修复：接线前用脚本 `"0"` **探测 D0**，`scriptBind = displayBind - D0`，再 `degToRad(scriptBind + cval*scale)`；骨驱动改绑 `float_limit`
+- 热修已跑通：`mh2max_wire_oral_bones_live.ms`（24 OK）；Jaw 开合 chin 正常
+
+## 2026-08-21 — 修复 float_script `cval` 未定义异常
+
+- 报错：`没有与以下项对应的 "*" 函数 undefined`（表达式含 `cval * …` 但目标未绑定）
+- 根因：中文 Max 上 `float_limit[#Limited_Controller__Bezier_Float]` 返回的是 **SubAnim**，需再取 `.controller` 得到真正的 `bezier_float` 才能 `addTarget`
+- 已修：`getAxisCtrl` / `mhGetAxisCtrl` 深入到 `bezier_float`；删除有问题的 `mh2max_fix_all_rotlist_bones.ms`
+- 热修：清掉坏脚本后重跑 `mh2max_wire_oral_bones_live.ms`（24 OK）
+
+## 2026-08-21 — 修复下巴坍缩（Skin 绑定被 Rotation_list 破坏）
+
+- 根因：对已蒙皮关节使用 `Rotation_list(FROZEN=绑定位姿, ZERO=驱动)`，合成矩阵 ≠ 原始 `Euler_XYZ` 绑定，Skin 下颌顶点塌向骨原点
+- 修复：改为 **单层 Euler_XYZ** + `degToRad(bind + cval*scale)`；Jaw/LLR 绑定强制 `X=-130`
+
+## 2026-08-21 — 视口肤色统一
+
+- `forceOpaqueAllMeshes`：head / body 使用同一 RGB（200,160,135），消除颈胸接缝色差
+
+## 2026-08-21 — 视口对准 v5（无摄像机）
+
+- 装配结束改为 **透视用户视口** 正对头部 + 面控面板（含全部 CTRL/FRM）
+- **不再创建/保留** `mh2max_faceCam` / `mh2max_faceTgt`
+- 一键导出仍 `fileIn max/mh2max_pipeline.ms`
+
+## 2026-08-21 — 滑块限位 v5（一键导出 3ds Max）
+
+- 射线形 FRM：Maya 实为两端 enable 的线段；未使用轴硬钉 `float_limit 0..0`
+- 开关/follow 滑条（lookAt / rigLogic / convergence / faceGUIfollowHead / eyesAimFollowHead）纳入限位
+- FreezeTransform 前先收到父级原点，强制 `FROZEN_POSITION=[0,0,0]`，行程只走 `ZERO_POS`
+- 软钳制会把 FROZEN 漂移折回 ZERO，避免手柄视觉飞出轨道
+- 不缩放 CTRL 手柄（避免 pick 放大导致变宽）
+
+一键导出仍通过 `export_maya.py` 生成 `mh2max_job.ms` → `fileIn` 本仓库 `max/mh2max_pipeline.ms`。
