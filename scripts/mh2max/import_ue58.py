@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Import UE 5.6+ DCC Export zip (head.dna + body.dna) into Maya via MetaHuman for Maya."""
+"""Import UE 5.6+ DCC Export (zip or folder with head.dna + body.dna) via MetaHuman for Maya."""
 from __future__ import print_function
 
 import json
@@ -25,9 +25,64 @@ def _safe_name(name):
 
 def import_dir_for_zip(zip_path):
     """Process folder beside the zip: <zipDir>/MHI_<zipStem>."""
-    parent = os.path.dirname(os.path.abspath(zip_path))
-    stem = _safe_name(os.path.splitext(os.path.basename(zip_path))[0])
+    return import_dir_for_source(zip_path)
+
+
+def import_dir_for_source(source_path):
+    """Process folder beside the source: <parent>/MHI_<stem>."""
+    parent = os.path.dirname(os.path.abspath(source_path))
+    base = os.path.basename(os.path.abspath(source_path))
+    if os.path.isfile(source_path):
+        stem = _safe_name(os.path.splitext(base)[0])
+    else:
+        stem = _safe_name(base)
     return os.path.join(parent, "MHI_" + stem)
+
+
+def _is_ue_export_root(folder):
+    """True if folder looks like a UE DCC Export root (manifest and/or DNA pair)."""
+    if not folder or not os.path.isdir(folder):
+        return False
+    if os.path.isfile(os.path.join(folder, "ExportManifest.json")):
+        return True
+    return os.path.isfile(os.path.join(folder, "head.dna")) and os.path.isfile(
+        os.path.join(folder, "body.dna")
+    )
+
+
+def find_ue_export_root(folder, max_depth=4):
+    """
+    Locate UE DCC Export root under folder.
+    Prefer ExportManifest.json; fall back to head.dna + body.dna.
+    Searches breadth-first up to max_depth.
+    """
+    folder = os.path.abspath(folder or "")
+    if not os.path.isdir(folder):
+        return None
+    if _is_ue_export_root(folder):
+        return folder
+
+    queue = [(folder, 0)]
+    seen = {folder}
+    while queue:
+        cur, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        try:
+            names = sorted(os.listdir(cur))
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or name.lower() in ("__macosx", "thumbs.db"):
+                continue
+            child = os.path.join(cur, name)
+            if not os.path.isdir(child) or child in seen:
+                continue
+            seen.add(child)
+            if _is_ue_export_root(child):
+                return child
+            queue.append((child, depth + 1))
+    return None
 
 
 def unique_import_dir(base_dir):
@@ -284,27 +339,83 @@ def install_help_message():
     )
 
 
+def _flatten_single_inner_folder(char_dir):
+    """If char_dir has one child folder that is the real export root, promote its contents."""
+    entries = [e for e in os.listdir(char_dir) if not e.startswith(".")]
+    if len(entries) != 1:
+        return
+    inner = os.path.join(char_dir, entries[0])
+    if not os.path.isdir(inner):
+        return
+    if not (
+        os.path.isfile(os.path.join(inner, "ExportManifest.json"))
+        or os.path.isfile(os.path.join(inner, "head.dna"))
+    ):
+        return
+    tmp = char_dir + "_tmp_inner"
+    os.rename(inner, tmp)
+    for item in os.listdir(tmp):
+        shutil.move(os.path.join(tmp, item), os.path.join(char_dir, item))
+    shutil.rmtree(tmp)
+
+
+def _assets_dict_from_char_dir(char_dir, name_hint="MetaHuman"):
+    """Read ExportManifest / DNA from prepared char_dir and build assets dict."""
+    parent_dir = os.path.dirname(char_dir)
+    manifest = {}
+    man_path = os.path.join(char_dir, "ExportManifest.json")
+    if os.path.isfile(man_path):
+        with open(man_path, "r", encoding="utf-8") as fh:
+            manifest = json.loads(fh.read())
+
+    head = os.path.join(char_dir, (manifest.get("dna") or {}).get("head") or "head.dna")
+    body = os.path.join(char_dir, (manifest.get("dna") or {}).get("body") or "body.dna")
+    if not os.path.isfile(head):
+        raise RuntimeError(u"缺少 head.dna：%s" % char_dir)
+    if not os.path.isfile(body):
+        raise RuntimeError(u"缺少 body.dna：%s" % char_dir)
+
+    name = manifest.get("metaHumanName") or _safe_name(name_hint)
+    return {
+        "char_dir": char_dir,
+        "parent_dir": parent_dir,
+        "name": name,
+        "manifest": manifest,
+        "head_dna": os.path.abspath(head),
+        "body_dna": os.path.abspath(body),
+        "maps_dir": os.path.join(char_dir, (manifest.get("folders") or {}).get("maps") or "Maps"),
+        "masks_dir": os.path.join(char_dir, (manifest.get("folders") or {}).get("masks") or "Masks"),
+        "engine": manifest.get("exportEngineVersion") or "",
+    }
+
+
+def _resolve_char_dir(source_path, dest_dir=None, dest_root=None, overwrite=False, progress=None):
+    if dest_dir:
+        char_dir = dest_dir
+    elif dest_root:
+        base = os.path.basename(os.path.abspath(source_path))
+        if os.path.isfile(source_path):
+            base = os.path.splitext(base)[0]
+        char_dir = os.path.join(dest_root, "MHI_" + _safe_name(base))
+    else:
+        char_dir = import_dir_for_source(source_path)
+
+    if os.path.exists(char_dir) and not overwrite:
+        char_dir = unique_import_dir(char_dir)
+        if progress:
+            progress.log(u"目录已存在，改用 %s" % char_dir)
+    return char_dir
+
+
 def extract_ue_zip(zip_path, dest_dir=None, progress=None, dest_root=None, overwrite=False):
     """Extract DCC Export zip into sibling MHI_<name> (or dest_dir override)."""
     if not zip_path or not os.path.isfile(zip_path):
         raise RuntimeError(u"zip 不存在：%s" % zip_path)
 
-    # dest_dir = full character folder; dest_root kept only for old callers
-    if dest_dir:
-        char_dir = dest_dir
-    elif dest_root:
-        base = _safe_name(os.path.splitext(os.path.basename(zip_path))[0])
-        char_dir = os.path.join(dest_root, "MHI_" + base)
-    else:
-        char_dir = import_dir_for_zip(zip_path)
+    char_dir = _resolve_char_dir(
+        zip_path, dest_dir=dest_dir, dest_root=dest_root, overwrite=overwrite, progress=progress
+    )
 
-    # Non-UI safety: if exists and not overwrite, pick a unique sibling name
-    if os.path.exists(char_dir) and not overwrite:
-        char_dir = unique_import_dir(char_dir)
-        if progress:
-            progress.log(u"目录已存在，改用 %s" % char_dir)
-
-    parent_dir = os.path.dirname(char_dir)
     if progress:
         progress.event(u"准备输出目录…")
         progress.log(u"准备目录 %s" % char_dir)
@@ -323,7 +434,6 @@ def extract_ue_zip(zip_path, dest_dir=None, progress=None, dest_root=None, overw
             zf.extract(name, char_dir)
             n = i + 1
             if progress:
-                # Update bar frequently; log every ~5% or last file
                 if n == 1 or n == total or (n % max(1, total // 20) == 0) or (n % 8 == 0):
                     progress.step_progress(n, total, u"解压文件")
                     if n == 1 or n == total or (n % max(1, total // 10) == 0):
@@ -333,45 +443,96 @@ def extract_ue_zip(zip_path, dest_dir=None, progress=None, dest_root=None, overw
         progress.event(u"整理解压目录…")
         progress.log(u"检查 ExportManifest / DNA…")
 
-    # If zip had a single top-level folder, descend into it
-    entries = [e for e in os.listdir(char_dir) if not e.startswith(".")]
-    if len(entries) == 1 and os.path.isdir(os.path.join(char_dir, entries[0])):
-        inner = os.path.join(char_dir, entries[0])
-        if os.path.isfile(os.path.join(inner, "ExportManifest.json")) or os.path.isfile(
-            os.path.join(inner, "head.dna")
-        ):
-            tmp = char_dir + "_tmp_inner"
-            os.rename(inner, tmp)
-            for item in os.listdir(tmp):
-                shutil.move(os.path.join(tmp, item), os.path.join(char_dir, item))
-            shutil.rmtree(tmp)
-
-    manifest = {}
-    man_path = os.path.join(char_dir, "ExportManifest.json")
-    if os.path.isfile(man_path):
-        manifest = json.loads(open(man_path, "r", encoding="utf-8").read())
-
-    head = os.path.join(char_dir, (manifest.get("dna") or {}).get("head") or "head.dna")
-    body = os.path.join(char_dir, (manifest.get("dna") or {}).get("body") or "body.dna")
-    if not os.path.isfile(head):
-        raise RuntimeError(u"缺少 head.dna：%s" % char_dir)
-    if not os.path.isfile(body):
-        raise RuntimeError(u"缺少 body.dna：%s" % char_dir)
-
+    _flatten_single_inner_folder(char_dir)
     zip_stem = _safe_name(os.path.splitext(os.path.basename(zip_path))[0])
-    name = manifest.get("metaHumanName") or zip_stem
+    return _assets_dict_from_char_dir(char_dir, name_hint=zip_stem)
 
-    return {
-        "char_dir": char_dir,
-        "parent_dir": parent_dir,
-        "name": name,
-        "manifest": manifest,
-        "head_dna": os.path.abspath(head),
-        "body_dna": os.path.abspath(body),
-        "maps_dir": os.path.join(char_dir, (manifest.get("folders") or {}).get("maps") or "Maps"),
-        "masks_dir": os.path.join(char_dir, (manifest.get("folders") or {}).get("masks") or "Masks"),
-        "engine": manifest.get("exportEngineVersion") or "",
-    }
+
+def prepare_ue_folder(folder_path, dest_dir=None, progress=None, dest_root=None, overwrite=False):
+    """
+    Copy UE DCC Export folder (already unzipped) into sibling MHI_<name>.
+    Accepts the export root or a parent folder; searches for ExportManifest / DNA.
+    """
+    if not folder_path or not os.path.isdir(folder_path):
+        raise RuntimeError(u"文件夹不存在：%s" % folder_path)
+
+    src_root = find_ue_export_root(folder_path)
+    if not src_root:
+        raise RuntimeError(
+            u"在所选文件夹中未找到 UE DCC Export（需要 ExportManifest.json 或 head.dna + body.dna）：\n%s"
+            % folder_path
+        )
+
+    char_dir = _resolve_char_dir(
+        folder_path, dest_dir=dest_dir, dest_root=dest_root, overwrite=overwrite, progress=progress
+    )
+
+    src_abs = os.path.abspath(src_root)
+    dst_abs = os.path.abspath(char_dir)
+    if src_abs == dst_abs:
+        if progress:
+            progress.event(u"使用已有导出目录…")
+            progress.log(u"源目录即过程目录：%s" % char_dir)
+        return _assets_dict_from_char_dir(char_dir, name_hint=os.path.basename(folder_path))
+
+    if progress:
+        progress.event(u"准备输出目录…")
+        progress.log(u"导出根目录：%s" % src_root)
+        progress.log(u"准备目录 %s" % char_dir)
+    prepare_import_dir(char_dir, overwrite=True, progress=progress)
+
+    if progress:
+        progress.event(u"正在复制文件夹…")
+        progress.log(u"复制到 %s" % char_dir)
+
+    # Copy tree with progress on top-level entries
+    try:
+        entries = [e for e in os.listdir(src_root) if not e.startswith(".")]
+    except OSError as ex:
+        raise RuntimeError(u"无法读取导出目录：%s\n%s" % (src_root, ex))
+    total = max(1, len(entries))
+    for i, name in enumerate(entries):
+        if progress and progress.cancelled:
+            raise RuntimeError(u"用户取消导入")
+        src = os.path.join(src_root, name)
+        dst = os.path.join(char_dir, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        n = i + 1
+        if progress:
+            progress.step_progress(n, total, u"复制文件")
+            progress.log(u"复制 %s/%s  %s" % (n, total, name))
+
+    if progress:
+        progress.event(u"整理导出目录…")
+        progress.log(u"检查 ExportManifest / DNA…")
+
+    _flatten_single_inner_folder(char_dir)
+    return _assets_dict_from_char_dir(char_dir, name_hint=os.path.basename(folder_path))
+
+
+def prepare_ue_source(source_path, dest_dir=None, progress=None, dest_root=None, overwrite=False):
+    """Prepare assets from a zip file or an already-extracted folder."""
+    source_path = os.path.abspath(source_path or "")
+    if os.path.isfile(source_path) and source_path.lower().endswith(".zip"):
+        return extract_ue_zip(
+            source_path,
+            dest_dir=dest_dir,
+            progress=progress,
+            dest_root=dest_root,
+            overwrite=overwrite,
+        )
+    if os.path.isdir(source_path):
+        return prepare_ue_folder(
+            source_path,
+            dest_dir=dest_dir,
+            progress=progress,
+            dest_root=dest_root,
+            overwrite=overwrite,
+        )
+    raise RuntimeError(u"请选择 .zip 文件或包含 head.dna / body.dna 的文件夹：\n%s" % source_path)
 
 
 def assemble_with_metahuman_for_maya(assets, progress=None, options=None):
@@ -648,20 +809,34 @@ def verify_assembled_scene(progress=None):
 
 
 def import_ue_zip(zip_path, dest_dir=None, verify=True, dest_root=None, overwrite=False, progress_ui=None):
-    """Full import with progress UI. Returns assets + optional verify report."""
+    """Full import from zip or folder. Returns assets + optional verify report."""
+    return import_ue_source(
+        zip_path,
+        dest_dir=dest_dir,
+        verify=verify,
+        dest_root=dest_root,
+        overwrite=overwrite,
+        progress_ui=progress_ui,
+    )
+
+
+def import_ue_source(source_path, dest_dir=None, verify=True, dest_root=None, overwrite=False, progress_ui=None):
+    """Full import with progress UI (zip or folder). Returns assets + optional verify report."""
     state = {"assets": None, "report": None, "assemble": None, "plugin": None}
-    # dest_dir = MHI folder; dest_root legacy → MHI_<zip> under that root
+    is_folder = bool(source_path) and os.path.isdir(source_path)
     if dest_dir is None and dest_root:
-        base = _safe_name(os.path.splitext(os.path.basename(zip_path or ""))[0])
-        dest_dir = os.path.join(dest_root, "MHI_" + base)
+        base = os.path.basename(os.path.abspath(source_path or ""))
+        if os.path.isfile(source_path or ""):
+            base = os.path.splitext(base)[0]
+        dest_dir = os.path.join(dest_root, "MHI_" + _safe_name(base))
     if dest_dir is None:
-        dest_dir = import_dir_for_zip(zip_path)
+        dest_dir = import_dir_for_source(source_path)
 
     def s_extract(ui):
-        if not zip_path or not os.path.isfile(zip_path):
-            raise RuntimeError(u"zip 不存在：%s" % zip_path)
-        state["assets"] = extract_ue_zip(
-            zip_path, dest_dir=dest_dir, progress=ui, overwrite=overwrite
+        if not source_path or not (os.path.isfile(source_path) or os.path.isdir(source_path)):
+            raise RuntimeError(u"源路径不存在：%s" % source_path)
+        state["assets"] = prepare_ue_source(
+            source_path, dest_dir=dest_dir, progress=ui, overwrite=overwrite
         )
         a = state["assets"]
         ui.log(u"角色 %s | 引擎 %s" % (a["name"], a.get("engine") or "?"))
@@ -677,7 +852,7 @@ def import_ue_zip(zip_path, dest_dir=None, verify=True, dest_root=None, overwrit
             a = state["assets"] or {}
             raise RuntimeError(
                 install_help_message()
-                + u"\n\n已解压到：\n%s\n\n装好 MetaHuman for Maya 后，可在 Character Assembler 中打开该目录。"
+                + u"\n\n已准备到：\n%s\n\n装好 MetaHuman for Maya 后，可在 Character Assembler 中打开该目录。"
                 % (a.get("char_dir") or dest_dir)
             )
         ui.log(u"MetaHuman for Maya：%s" % plug.get("module"))
@@ -711,8 +886,9 @@ def import_ue_zip(zip_path, dest_dir=None, verify=True, dest_root=None, overwrit
             for e in r["errors"]:
                 ui.log(u"注意：" + e)
 
+    prep_label = u"复制 UE DCC Export 文件夹" if is_folder else u"解压 UE DCC Export zip"
     steps = [
-        (u"解压 UE DCC Export zip", s_extract),
+        (prep_label, s_extract),
         (u"检测 MetaHuman for Maya 插件", s_check),
         (u"装配头部 / 身体 / 贴图 / 绑定", s_assemble),
     ]
@@ -723,13 +899,18 @@ def import_ue_zip(zip_path, dest_dir=None, verify=True, dest_root=None, overwrit
     return state
 
 
-def _pick_zip_path():
-    """Open a zip picker that reliably lists files (incl. Chinese paths)."""
+def _default_pick_start():
     start = r"Y:\下载\mod\metahuman"
     if not os.path.isdir(start):
         start = os.path.join(os.path.expanduser("~"), "Documents")
     if not os.path.isdir(start):
         start = os.path.expanduser("~")
+    return start
+
+
+def _pick_zip_path():
+    """Open a zip picker that reliably lists files (incl. Chinese paths)."""
+    start = _default_pick_start()
 
     # Prefer Qt dialog — Maya fileDialog2 native filter often hides *.zip on Win/CN paths
     try:
@@ -764,39 +945,108 @@ def _pick_zip_path():
     return picked[0]
 
 
+def _pick_folder_path():
+    """Pick a folder that contains (or nests) UE DCC Export DNA files."""
+    start = _default_pick_start()
+    try:
+        try:
+            from PySide6.QtWidgets import QFileDialog  # type: ignore
+        except ImportError:
+            from PySide2.QtWidgets import QFileDialog  # type: ignore
+
+        path = QFileDialog.getExistingDirectory(
+            None,
+            u"选择 UE DCC Export 文件夹（含 head.dna / body.dna）",
+            start,
+        )
+        if path:
+            return path
+        return None
+    except Exception:
+        pass
+
+    picked = cmds.fileDialog2(
+        dialogStyle=1,
+        fileMode=3,
+        caption=u"选择 UE DCC Export 文件夹（含 head.dna / body.dna）",
+        startingDirectory=start,
+        okCaption=u"选择",
+        cancelLabel=u"取消",
+    )
+    if not picked:
+        return None
+    return picked[0]
+
+
+def _pick_import_source():
+    """Ask zip vs folder, then open the corresponding picker. Returns absolute path or None."""
+    choice = cmds.confirmDialog(
+        title=u"导入 MH",
+        message=u"请选择 UE DCC Export 来源：\n\n"
+        u"• ZIP：未解压的 DCC Export 压缩包\n"
+        u"• 文件夹：已解压目录（含 ExportManifest.json 或 head.dna + body.dna）\n"
+        u"  （也可选父目录，将自动向下搜索）",
+        button=[u"选择 ZIP", u"选择文件夹", u"取消"],
+        defaultButton=u"选择 ZIP",
+        cancelButton=u"取消",
+        dismissString=u"取消",
+    )
+    if choice == u"选择 ZIP":
+        return _pick_zip_path()
+    if choice == u"选择文件夹":
+        return _pick_folder_path()
+    return None
+
+
 def run_import_mh_ui():
-    """MH2Max > 导入 MH — after zip pick, always show progress bar + current event."""
+    """MH2Max > 导入 MH — after zip/folder pick, always show progress bar + current event."""
     from .progress_ui import ProgressUI, end_busy, show_busy, update_busy
 
     # Instant strip while opening file dialog
-    show_busy(u"请选择 UE DCC Export zip…", title=u"导入 MH")
+    show_busy(u"请选择 UE DCC Export（zip 或文件夹）…", title=u"导入 MH")
     try:
         cmds.waitCursor(state=False)
     except Exception:
         pass
 
-    zip_path = None
+    source_path = None
     try:
-        zip_path = _pick_zip_path()
+        source_path = _pick_import_source()
     except Exception as ex:
         end_busy()
         cmds.confirmDialog(title=u"导入 MH", message=u"文件选择失败：%s" % ex, button=[u"确定"])
         raise
 
-    if not zip_path:
+    if not source_path:
         end_busy()
         return
 
-    # —— Zip selected: show progress window immediately ——
-    show_busy(u"已选择 zip，正在打开进度窗口…", title=u"导入 MH")
-    update_busy(u"已选择：%s" % os.path.basename(zip_path), 5)
+    source_path = os.path.abspath(source_path)
+    is_folder = os.path.isdir(source_path)
+    kind_label = u"文件夹" if is_folder else u"zip"
+
+    if is_folder:
+        found = find_ue_export_root(source_path)
+        if not found:
+            end_busy()
+            cmds.confirmDialog(
+                title=u"导入 MH",
+                message=u"所选文件夹中未找到 ExportManifest.json 或 head.dna + body.dna：\n\n%s"
+                % source_path,
+                button=[u"确定"],
+            )
+            return
+
+    # —— Source selected: show progress window immediately ——
+    show_busy(u"已选择%s，正在打开进度窗口…" % kind_label, title=u"导入 MH")
+    update_busy(u"已选择：%s" % os.path.basename(source_path), 5)
 
     ui = ProgressUI(u"导入 MH", 6)
     ui.raise_window()
     ui.set_percent(5)
-    ui.event(u"已选择 zip")
-    ui.status(u"已选择文件，准备导入…")
-    ui.log(u"已选择：%s" % zip_path)
+    ui.event(u"已选择%s" % kind_label)
+    ui.status(u"已选择%s，准备导入…" % kind_label)
+    ui.log(u"已选择：%s" % source_path)
     ui._pump()
 
     ui.event(u"检测 MetaHuman for Maya 插件…")
@@ -805,21 +1055,22 @@ def run_import_mh_ui():
     plug = find_metahuman_for_maya()
     warn = u""
     if not plug.get("ok"):
-        warn = u"\n\n⚠ 尚未检测到 MetaHuman for Maya：将先解压 zip，装配需装插件后完成。"
-        ui.log(u"未检测到 MetaHuman for Maya（将仅解压或稍后装配）")
+        warn = u"\n\n⚠ 尚未检测到 MetaHuman for Maya：将先准备文件，装配需装插件后完成。"
+        ui.log(u"未检测到 MetaHuman for Maya（将仅准备文件或稍后装配）")
     else:
         ui.log(u"已检测到 MetaHuman for Maya：%s" % (plug.get("module") or "ok"))
 
-    out_dir = import_dir_for_zip(zip_path)
+    out_dir = import_dir_for_source(source_path)
     ui.event(u"等待确认导入…")
     ui.set_percent(10)
     ui.log(u"默认输出目录：%s" % out_dir)
     ui.raise_window()
 
+    action = u"复制并装配" if is_folder else u"解压并装配"
     choice = cmds.confirmDialog(
         title=u"导入 MH",
-        message=u"将解压并装配（装配时会新建场景，未保存内容丢失）：\n\n%s\n\n输出目录：\n%s%s"
-        % (zip_path, out_dir, warn),
+        message=u"将%s（装配时会新建场景，未保存内容丢失）：\n\n%s\n\n输出目录：\n%s%s"
+        % (action, source_path, out_dir, warn),
         button=[u"开始导入", u"取消"],
         defaultButton=u"开始导入",
         cancelButton=u"取消",
@@ -855,15 +1106,15 @@ def run_import_mh_ui():
             ui.log(u"改用新目录：%s" % out_dir)
 
     ui.raise_window()
-    ui.event(u"开始解压与装配…")
+    ui.event(u"开始准备与装配…")
     ui.status(u"导入进行中…")
     ui.set_percent(12)
     ui.log(u"开始导入 → %s" % out_dir)
-    show_busy(u"解压与装配进行中…", title=u"导入 MH")
+    show_busy(u"准备与装配进行中…", title=u"导入 MH")
 
     try:
-        state = import_ue_zip(
-            zip_path, dest_dir=out_dir, verify=True, overwrite=overwrite, progress_ui=ui
+        state = import_ue_source(
+            source_path, dest_dir=out_dir, verify=True, overwrite=overwrite, progress_ui=ui
         )
         assets = state.get("assets") or {}
         report = state.get("report") or {}
@@ -874,7 +1125,7 @@ def run_import_mh_ui():
         if assemble.get("method") == "ui":
             cmds.confirmDialog(
                 title=u"导入 MH",
-                message=u"已解压到：\n%s\n\n已打开 Character Assembler。\n请选择角色 %s，勾选 Head/Body/Textures 后 Assemble。\n完成后可用「检测当前角色」。"
+                message=u"已准备到：\n%s\n\n已打开 Character Assembler。\n请选择角色 %s，勾选 Head/Body/Textures 后 Assemble。\n完成后可用「检测当前角色」。"
                 % (assets.get("char_dir"), assets.get("name")),
                 button=[u"确定"],
             )
@@ -906,7 +1157,7 @@ def run_import_mh_ui():
                     u"MetaHuman 的 RL4 插件读不到 DNA 文件。\n\n"
                     u"常见原因：过程目录路径含中文（例如「下载」）。\n"
                     u"工具已改为自动复制到英文临时目录再装配；请重试一次导入。\n"
-                    u"若仍失败，请把 zip 放到纯英文路径后再导入。\n\n"
+                    u"若仍失败，请把源文件放到纯英文路径后再导入。\n\n"
                     u"%s"
                 )
                 % msg[-2800:],

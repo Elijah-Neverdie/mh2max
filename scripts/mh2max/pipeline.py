@@ -79,7 +79,7 @@ def run_export(out_dir=None, launch=True, face_only=True, progress_ui=None, info
                 ui.log(u"Morph %s/%s  %s" % (i, total, name))
             return True
 
-        morph = export_morphs(out_dir, log_path, progress_cb=cb, face_only=face_only)
+        morph = export_morphs(out_dir, log_path, progress_cb=cb, face_only=face_only, info=info)
         folders = morph.get("folders") or []
         ui.log(
             u"Morph 完成：导出 %s / 跳过 %s / 失败 %s / 共 %s"

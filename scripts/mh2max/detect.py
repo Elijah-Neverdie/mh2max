@@ -163,32 +163,83 @@ def _character_name():
     return "MetaHuman"
 
 
+def _std_map():
+    """Load mh2max standardize map if present (logical → real short names)."""
+    try:
+        from .standardize import _load_map
+
+        return _load_map() or {}
+    except Exception:
+        return {}
+
+
+def _resolve_mapped(logical, std_map=None):
+    std_map = std_map if std_map is not None else _std_map()
+    meshes = std_map.get("meshes") or {}
+    real = meshes.get(logical) or logical
+    node = resolve(real)
+    if node:
+        return node
+    if cmds.objExists(real):
+        return cmds.ls(real, long=True)[0]
+    return None
+
+
 def detect_scene():
-    head = resolve("head_lod0_mesh")
-    gui = resolve("CTRL_faceGUI")
+    std_map = _std_map()
+    head = _resolve_mapped("head_lod0_mesh", std_map) or resolve("head_lod0_mesh")
+    gui = (
+        resolve("CTRL_faceGUI")
+        or resolve(std_map.get("face_gui") or "")
+        or resolve("FRM_faceGUI")
+        or resolve("FaceGUI_Ctrl")
+    )
     ctrls = (cmds.ls("CTRL_*", type="transform") or []) + (cmds.ls("*:CTRL_*", type="transform") or [])
     ctrls = list(dict.fromkeys(ctrls))
-    body = _find_body_mesh()
+    # custom *_Ctrl under FRM also count toward "has face" after standardize proxies
+    if len(ctrls) < 20:
+        custom = []
+        for f in cmds.ls("FRM_*", type="transform") or []:
+            for k in cmds.listRelatives(f, c=True, type="transform") or []:
+                if short_name(k).endswith("_Ctrl"):
+                    custom.append(k)
+        if len(custom) >= 20 and not ctrls:
+            # not yet standardized — still fail with MH message, but note count
+            pass
+    body = _resolve_mapped("body", std_map) or _resolve_mapped(
+        "m_med_unw_body_lod0_mesh", std_map
+    ) or _find_body_mesh()
     errors = []
     if not head:
         errors.append("场景里没有 head_lod0_mesh，请先用 DHI 装配 MetaHuman。")
     if not gui and len(ctrls) < 20:
         errors.append("场景里没有面部控制器（CTRL_faceGUI / CTRL_*）。")
     if errors:
-        return {"ok": False, "errors": errors}
+        return {"ok": False, "errors": errors, "standardized": bool(std_map.get("meshes"))}
 
     body_code = _body_code_from_name(body) if body else "unknown"
     combined = _find_by_suffix("_combined_lod0_mesh")
     flipflops = _find_by_suffix("_flipflops_lod0_mesh")
     body_grp = resolve("body_lod0_grp")
     head_grp = resolve("head_grp")
-    gui_grp = resolve("GRP_faceGUI") or resolve("headGui_grp")
+    gui_grp = (
+        resolve("GRP_faceGUI")
+        or resolve("headGui_grp")
+        or resolve("mh2max_ui_grp")
+        or resolve("FRM_faceGUI")
+    )
 
     head_parts = {}
     for n in HEAD_MESH_NAMES:
-        node = resolve(n)
+        node = _resolve_mapped(n, std_map) or resolve(n)
         if node:
             head_parts[n] = node
+    # mapped extras from MESH_JOBS folders
+    for folder, mesh_name in MESH_JOBS:
+        if mesh_name not in head_parts:
+            node = _resolve_mapped(mesh_name, std_map)
+            if node:
+                head_parts[mesh_name] = node
 
     info = {
         "ok": True,
@@ -209,6 +260,14 @@ def detect_scene():
         "scene": cmds.file(q=True, sn=True) or "",
         "maya_up": (cmds.upAxis(q=True, axis=True) or ["y"])[0],
         "linear_unit": cmds.currentUnit(q=True, linear=True),
+        "standardized": bool(std_map),
+        "mesh_map": dict(std_map.get("meshes") or {}),
+        "extra_meshes": [
+            resolve(n) or n
+            for n in (std_map.get("extra_meshes") or [])
+            if n
+        ],
+        "body_root": resolve(std_map.get("body_root") or "") if std_map.get("body_root") else None,
         "bbox": {
             "head": _bbox(head),
             "body": _bbox(body),

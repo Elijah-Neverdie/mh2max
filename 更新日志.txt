@@ -1,5 +1,173 @@
 # mh2max 更新日志
 
+## 2026-09-04 — v1.3.31 Max Z-up 轴向：整棵 FBX 层级一起转
+
+- 现象：一键导入 Max 后角色整体躺倒约 90°（Max 为 Z-up，Maya 为 Y-up）
+- 根因：v1.3.28 把 `FBXImporterSetParam "UpAxis"` 锁成 `"Y"`，FBX 不再做轴转换；Morph OBJ 仍 `rotate -90 X`，和角色对不齐
+- 修复：Maya 导出强制 `FBXExportUpAxis y` + `AxisConversionMethod none`（文件保持 Y-up，避免两侧各转一次）
+- Max 导入：`AxisConversion true` + `UpAxis "Z"`，FBX 对每个根节点转 90°，蒙皮/骨骼/控制器/IK 随整棵层级一起转到 Z-up
+- **必须从 Maya 重新「导出至 3ds Max」**（旧 FBX 若已被标成 Z-up 或按 Y-up 导入过，请整包重导）
+
+## 2026-09-01 — v1.3.30 UE5 控制器同步菜单
+
+- MH2Max 菜单「隐藏控制器」上方新增 **UE5控制器同步**，打开 MeshToMetahuman 的 Maya→UE 控制器同步面板
+- 同步面板新增 **控制器恢复初始状态**（重置所有 `*_Ctrl` 局部矩阵与 IKFK 开关，并写入 JSON 供 UE 读取）
+
+## 2026-08-28 — v1.3.29 回退身体控制器优化
+
+- 移除 Maya 导出 `mh2max_body_drive.txt` 及 Max 端 Pos/Ori / IK 接线（v1.3.12–v1.3.28 身体驱动实验）
+- `wireBodyLinksFromFile` 改为空操作；身体控制器仅依赖 FBX 导入层级
+- 保留：面部 Morph、CTRL_* 代理、滑杆限位、FBX 导入一致性（v1.3.28）、身体控制器不误冻结（v1.3.11）
+- 删除独立调试脚本 `mh2max_body_wire_v21/v22/v23.ms`、`mh2max_body_sync_debug.ms`
+- **若 Max 场景曾被身体接线弄坏，请从 Maya 重新一键导出并导入**
+
+## 2026-08-26 — v1.3.23 腿部 FK/IK 混合修复（blend 双目标 50/50）【已回退于 1.3.29】
+
+- 根因：驱动表腿为 IK 模式，blend 链只连 IK_Jnt → blend Jnt，FK 控制器转动不影响皮肤骨骼
+- 修复：给 `Hip_Jnt`/`Knee_Jnt`/`Ankle_Jnt` 同时添加 FK_Jnt 和 IK_Jnt 两个约束目标（50/50 权重混合）
+- 同样修复 `thigh_l/r`（加 `Hip_Jnt`）和 `calf_l/r`（加 `Knee_Jnt`）的 UE 蒙皮骨约束
+- 全面测试结果：18 个控制器全部 OK（双臂 FK×6 + 双腿 FK×6 + 双腿 IK×2 + 躯干×3 + 头×1）
+- rest 网格不变 `[32.98, 8.76, 18.85]`，无拉丝
+
+## 2026-08-26 — v1.3.22 身体驱动对照 Maya：关继承 + IK 跟 Sub/PV
+
+- 对照同一组控制器（COG_Sub / 左臂 FK / 左腿 IK_Sub + PV）：Max 骨骼误差 pelvis 0.6、thigh 1.2、calf 1.2、foot 0、head 5.7、hand ~9 英寸；rest 网格仍为 `[32.98, 8.76, 18.85]`，无拉丝
+- IK 目标改为 `*_IK_Sub_Ctrl`（用户动的是 Sub，不是父级 IK_Ctrl）；极向量仍走 `VHTarget`
+- 蒙皮骨 `SetInheritanceFlags #{} keepPos:true`，避免相对约束与父级继承双重变换
+- 禁止把 Maya 欧拉/世界矩阵直接写进 Max 控制器（FBX 已把 rest 轴变成 Z-up；复制数值会反向倾倒并破坏 rest）
+- Maya 驱动表 `ik|...|goal` 优先写 Sub；Max 接线对旧表也会把 `*_IK_Ctrl` 解析成 Sub（若节点存在）
+
+## 2026-08-26 — v1.3.21 身体驱动：Pos/Ori 相对约束 + HI IK（对照 Maya 验证）
+
+- 逐控制器对照：肘/肩 FK 在 Max 与 Maya 同向驱动 `lowerarm_l`/`upperarm_l` 且 rest 网格不炸
+- 安全方案：非蒙皮 `parentKeepWorld`；UE/混合骨用 `Position_Constraint`+`Orientation_Constraint`（relative）；禁止 Link/重挂 UE 骨/`when` 回弹
+- 按 `IKFKSwitch` 写驱动表：臂默认 FK；腿常为 IK → `IKSys.ikChain` + PV
+- Maya 导出 `mh2max_body_drive.txt`（hier_fk/ribbon/blend/main/ue/ik）；Max 一键导入自动接线
+- 临时代码：`max/mh2max_body_wire_v21.ms`（当前会话已热修左臂 FK + 双腿 IK）
+- 已知差异：轴系/尺度下 tip 位移幅度可能与 Maya 不完全相等；IK/FK 切换需按导出时开关；完整一致性建议干净重导后跑一键接线
+
+## 2026-08-26 — v1.3.20 紧急回退身体同步（手部拉丝 + 控制器回弹）
+
+- 现象：默认姿势一臂网格拉成细长条；移动身体控制器后被强制弹回初始位置
+- 根因：v1.3.19 的 `when transform` + `mh2max_syncBody` 与控制器抢变换；hierarchy parent（Follicle/`*_Ctrl_Grp`/辅助 `*_Jnt`）形成错误链，PRS 写坏 UE 蒙皮骨世界矩阵
+- 处理：`wireBodyLinksFromFile` 再次空操作；清除 `#mh2maxBodySync` handlers；不再自动 parent / 写 UE 骨
+- 当前已打开且已损坏的 Max 场景：尽量热修左臂骨位 + 恢复层级；若仍异常请从 Maya 干净重导 FBX
+- 身体控制器驱动方案待另迭代（禁止 LinkConstraint / 重挂 UE 骨 / Ctrl↔Jnt↔Grp 环）
+
+## 2026-08-25 — v1.3.19 身体驱动：PRS 偏移同步（不炸 Skin）【已回退】
+
+- MCP 验证：`Link_Constraint` / 直接重挂 UE 蒙皮骨会炸网格；改用「捕获 rest 偏移 + 写世界矩阵」
+- Maya 导出写 `mh2max_body_drive.txt`（ue/hier），不在 Maya 里 bake 蒙皮骨
+- Max：非蒙皮 FK/Follicle 可 parent；UE 骨保持父子；`when transform` 触发 `mh2max_syncBody`
+- 临时代码：`max/mh2max_body_sync_debug.ms`（当前会话已 fileIn，可转肘/肩 FK 试）
+- 肩 FK 网格变形明显；肘 FK 有变形（轴系/尺度与 Maya 不完全一致，继续迭代）
+
+## 2026-08-25 — v1.3.18 回退身体驱动（Skin 炸裂）
+
+- 现象：Max 角色网格完全炸开，人形崩坏
+- 原因：v1.3.16/1.3.17 对 UE 蒙皮骨做 Link_Constraint / 重挂父级，破坏 Skin 绑定位姿
+- 处理：关闭 Maya 身体约束烘焙；Max `wireBodyLinksFromFile` 改为空操作
+- 保留：面部 Morph + CTRL_* 代理等既有逻辑
+- **当前炸裂场景无法热修，请用本版从 Maya 重新导出并重新导入 Max**
+
+## 2026-08-25 — v1.3.17 身体驱动：LinkConstraint + Follicle/FK 层级（与 Maya 对齐）【已回退】
+
+- MCP 对照：同转 `LF_Arm_01_Elbow_FK_Ctrl`，旧方案 Max 无网格反应
+- 根因三层：① UE 蒙皮骨被直接 parent 打散层级；② Follicle/Ribbon 未进 FBX；③ Elbow/Wrist 辅助骨靠 blendColors
+- 新策略：UE 骨保留父子 + `Link_Constraint` 跟随控制机；FK/Follicle/`*_Main_Grp`/辅助 `*_Jnt` 做 hierarchy bake
+- 当前 Max 热修后：肘/肩 FK 已带动 `lowerarm_l`/`hand_l` 与 Skin（maxVertD>0）
+- 请用本版从 Maya 重新一键导出，Max 导入会读 `mh2max_body_links.txt` 的 `link|parent` 模式
+
+## 2026-08-25 — v1.3.16 身体驱动接到 UE 蒙皮骨（ConstraintSystem）
+
+- 现象：Max 里拖 `LF_Arm_01_Up_Bendy_Ctrl` 等控制器角色不动
+- MCP 结论：Skin 骨骼是 `upperarm_l` 等 UE 名；控制器经 `ConstraintSystem` 里的 parentConstraint 驱动它们；旧烘焙只认约束父级，漏掉全部蒙皮骨链接
+- 选中的 Bendy 本身不直接驱动 `upperarm_l`（Maya 里由 `LF_Arm_01_Up_01_Jnt` → `upperarm_l`）
+- 修复：从约束输出插头解析真正 driven；只烘焙「控制机 → UE 蒙皮骨」；请重新导出
+- 当前 Max 已热修：`upperarm_l` 临时挂到 `LF_Arm_01_Up_01_Jnt`（可试 `LF_Arm_01_Up_01_Ctrl` / 肩 FK）
+
+## 2026-08-25 — v1.3.15 禁止面部骨骼烘焙 + 修复绑定位姿被 mute 弄坏
+
+- 现象：导出后面部崩坏（眼窝塌陷、白片）；身体控制器仍异常
+- 根因：身体约束烘焙把 Eye/Mouth/Cheek 等面部关节也 parent 进控制器，且先 mute 约束再取矩阵 → 绑定位姿错乱；Morph + 错 Skin 双重变形
+- 修复：仅烘焙四肢/躯干链接；面部/头部一律跳过；先记录世界矩阵再 mute；Max 端过滤面部链接
+- **必须重新从 Maya 导出**（当前崩坏的 Max 场景无法热修脸）
+
+## 2026-08-25 — v1.3.14 修复 MaxScript 嵌套函数编译错误
+
+- 现象：`mh2max 启动失败：编译错误：此处不允许使用外部局部 … isAnc`
+- 修复：将 `isAnc` / `parentKeepWorld` 提升为顶层函数（MaxScript 禁止函数内嵌套 fn）
+
+## 2026-08-25 — v1.3.13 修复身体约束烘焙几乎全失败
+
+- 现象：Max 身体控制器仍无法驱动；日志 `body bake … baked=8` / `body links wired=0`
+- 根因：烘焙时用长 DAG 路径，前几条 `parent` 后路径失效 → 大量「没有与名称匹配的对象」；`body_links.txt` 只写了成功的 8 条
+- 修复：每次按短名重新解析；循环父子先抬升控制器；按深度排序；写出全部 planned 链接供 Max 三遍补父级
+- **必须从 Maya 重新导出**（看日志应出现 `baked` 接近 `unique`，且 Max `body links pairs` ≫ 0）
+
+## 2026-08-25 — v1.3.12 Max 身体控制器可驱动蒙皮
+
+- 根因：3ds Max 不支持 FBX 导入的 Maya parent/point/orient 约束，身体 `*_Ctrl` 进 Max 后与骨骼断开，只能空转
+- 修复：导出 FBX 前将身体约束临时烘焙为「控制器父级 → 骨骼子级」（保持世界矩阵），导出后还原 Maya 场景
+- Max 装配读取 `mh2max_body_links.txt` 作安全补链；面部仍走 Morph，不受影响
+- **需从 Maya 重新「导出至 3ds Max」** 后身体控制器才会正确带动角色
+
+## 2026-08-25 — v1.3.11 修复 Max 身体控制器被误冻结
+
+- 根因：`freezeGuiDecor` 把所有 `*_Ctrl`（含 Master/COG/IK/FK）冻结隐藏，本意只处理面部原件
+- 修复：仅冻结「父级为 FRM_*」或「存在对应 CTRL_* 代理」的面部 `*_Ctrl`；身体控制器保持可移动
+- 当前已开场景可热修解冻（无需整包重导）
+
+## 2026-08-25 — v1.3.10 标准化确认后恢复进度条
+
+- 点「继续」后不再只剩忙光标：`confirmDialog` 会关掉进度条，现改为确认前关闭、确认后强制重建，并用 `processIdleEvents` 刷新显示
+- 补全缺失节点 / 拾取对话框期间同样重建进度条
+
+## 2026-08-25 — v1.3.9 菜单门禁 + 真实驱动器 + 检查更新
+
+- 检测当前角色：进度条；成功后才启用「导出至 3ds Max」（导入 MH 成功同理）
+- 菜单顺序：版本号 → 导入 MH → 检测 → 导出 → 分割线 → 检查更新（GitHub Releases）
+- Maya 标准化：按出站连接评分判定真实 `*_Ctrl` 驱动器；隐藏/锁定原件，仅保留可见可拾取的 `CTRL_*` 供 Max Morph 接线
+- 导出：姿态任务 L/R 镜像补齐（避免只扫到一侧 cornerPull）
+- Max：`freezeGuiDecor` 隐藏并冻结原 `*_Ctrl`，解冻所有滑杆 `CTRL_*`
+
+## 2026-08-25 — v1.3.8 修复自定义角色 Morph 扫空导致 Max 控制器无效
+
+- 现象：Max 中可拖动 CTRL，角色无表情变化；Maya 正常
+- 根因：`build_pose_jobs` 只用 `resolve(head_lod0_mesh)`，自定义网格（如 `SM_Male_Head_01`）扫到 0 任务 → 未导出 Morph OBJ → Max 仅有 Skin、无 Morpher 接线（日志 `morph files=0` / `wired=0`）
+- 修复：姿态扫描改用 `_mesh_resolve`（标准化映射）；空缓存强制重扫；烘焙版本戳 1.3.7
+- MCP 复测：Face=172 / Teeth=34 / EyeLash=42 / EyeShell=16（含 `CTRL_C_jaw`）
+
+## 2026-08-25 — v1.3.7 标准化进度条 + 全身网格/控制器面板导出
+
+- 标准化：进度条显示当前步骤；控制器全部显示并刷新后再弹出完成提示
+- CTRL 代理改为复制原控制器曲线形状并保持可见（旧版空 Dummy 可自动修复）
+- FBX：导出腿/手/服装等附加网格（`SM_Male_Body_01` 常仅为上身）
+- Max：不再按类别隐藏 Shape；保留 `CTRL_*` / `FRM_*` / `*_Ctrl` 面部面板可见
+
+## 2026-08-25 — v1.3.6 自定义角色「标准化」导出
+
+- 「检测当前角色」失败时弹窗：当前角色非 MetaHuman 标准角色，是否标准化项目
+- 标准化：不改原控制器/骨骼名；显示身体/面部控制器；为 FRM+`*_Ctrl` 创建隐藏 `CTRL_*` 代理（`connectAttr` 驱动原件）
+- 缺面部面板时建列表面板（按 DOF 1D/2D），放置时避让角色包围盒
+- 关键节点启发式失败时可拾取/输入名称；映射写入 `mh2max_meta`（`mh2max_std_map`）
+- 导出：FBX 选中映射网格；`mh2max_job.ms` 写入 `mh2max_morphMeshJobsOverride`；Max 管线优先用覆盖表（如 `SM_Male_Head_01`）
+
+## 2026-08-24 — v1.3.5 修复 Max 多 Morpher 叠层导致 jaw+eye 崩脸
+
+- 现象：`CTRL_C_jaw` 张嘴 + `CTRL_R_eye` 角落时 Maya 正常，Max 中脸中部严重塌陷
+- 根因：Face Morph 超过 100 通道时管道叠了多个 Morpher；Max 叠层并非安全相加，jaw+eye 同开时峰值顶点位移约 **2×** 且方向异常
+- 修复：`buildAndWireMorphs` 改为 **单个 Morpher**，用 `WM3_MC_BuildFromNode(ch>100)` 扩容（Max 2017+，实测 218→300 通道）
+- 口腔：仍跳过 FACIAL 骨 Script 接线，不回退下巴/牙龈既有策略
+- 热修脚本：`max/mh2max_repair_single_morpher.ms`（当前已开场景可 fileIn 重建 Morpher，无需整包重导）
+- MCP 复测：jaw / eye / both 顶点位移恢复可加性（v12178 both≈jaw，v18800 both≈eye）
+
+## 2026-08-24 — v1.3.4 导入 MH 支持文件夹
+
+- 「导入 MH」可选 **ZIP** 或 **已解压文件夹**
+- 文件夹可为导出根目录，或父目录（自动向下搜索 `ExportManifest.json` / `head.dna`+`body.dna`）
+- 仍写入旁路过程目录 `MHI_<名称>`，原文件夹不被破坏
+
 ## 2026-08-24 — v1.3.3 一键安装 bat + MetaHumanForMaya Release 包
 
 - 新增 `install.bat` / `tools/mh2max_install.py`：扫描 Maya & Max、默认全装、快捷方式多层解析、写入 config.json

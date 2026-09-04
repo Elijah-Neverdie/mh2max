@@ -1,48 +1,162 @@
-mh2max — MetaHuman → 3ds Max
-============================
+mh2max 使用说明（全中文）
+========================
 
-版本 1.3.2（Maya 2026 / Max 2026）
+版本 1.3.31（Maya 2026 / Max 2026 上开发测试；Maya 2022+ / Max 2022+ 可用）
 
-启动
-- 不再作为启动插件自动 loadPlugin（避免卡在启动屏）
-- 主窗口起来后才安装：文件 > MetaHuman
-- 模块文件：Documents\maya\modules\mh2max.mod → C:\Users\A\Tools\mh2max
+这是一份给使用者看的说明。GitHub 首页说明见 README.md，版本记录见 更新日志.txt。
 
-菜单
-- 顶栏 **MH2Max**（或 Epic 的 MetaHuman 菜单内）：导入 MH / 导出至 3ds Max / 检测
-- 不再写入「文件」菜单（会破坏 Maya 自带的 buildFileMenu）
 
-若「文件」菜单只剩 MetaHuman：运行 C:\Users\A\Tools\mh2max\reload_menu.py 或重启 Maya
+一、这个工具做什么
+------------------
+把 MetaHuman（或已标准化的自定义角色）从 Maya 导出到 3ds Max：
 
-导入 MH（UE 5.8 zip）
-1. 必须先安装 Epic「MetaHuman for Maya」（Fab → 装到 UE → 解压 Content 到 Documents\maya\modules）
-2. 文件 > MetaHuman > 导入 MH，选择如 MC_Test.zip
-3. 进度窗口显示「事件序号/总计」与日志，界面通过 refresh/processEvents 保持可刷新
-4. 解压目录默认：与 zip 同级的 MHI_<zip名>\；若已存在则询问覆盖，或自动用 MHI_xxx_2 等后缀
-5. 装配依赖 Character Assembler；装好插件后可自动/半自动 Assemble，并做眨眼与张嘴-牙齿联动验证
+1. 在 Maya 里导入或打开角色
+2. 烘焙面部 Morph（单轴 + 二维角落残差）
+3. 导出 FBX
+4. 启动 3ds Max，自动导入、接线 Morpher、限位、保存场景
 
-更新菜单（当前 Maya 已开着时）
-在脚本编辑器运行：C:\Users\A\Tools\mh2max\reload_menu.py
+Max 是 Z 向上，Maya 是 Y 向上。1.3.31 起由 FBX 在导入时把整棵层级转到 Z 向上（网格、骨骼、控制器、IK、蒙皮一起转），角色应直立站在 Max 里。
 
-注意
-- 不要同时开两个 Maya：dcc-mcp 会抢端口，第二个会卡成「无响应」
-- UE 5.8 zip 不能用旧 DHI CharacterImporter 直接装；需要 MetaHuman for Maya
 
-一键「导出至 3ds Max」面部装配策略（1.3）
-- Maya 侧按 MESH_JOBS 导出全部头部子网格 Morph：Face / Teeth / Saliva（牙龈）/ 眼部等
-- Max 侧对每个子网格独立装 Morpher 并接线 GUI；FACIAL 骨骼保持 FBX 绑定矩阵（不写 Script Controller）
-- 这样张嘴时牙龈随 Morph 运动，同时不会因改骨控制器导致下巴 Skin 坍缩
-- 新增子网格时：改 detect.MESH_JOBS + poses.POSE_JOBS，并同步 Max 的 mh2max_morphMeshJobs 表
+二、需要事先准备
+----------------
+- Autodesk Maya 2022 或更高
+- Autodesk 3ds Max 2022 或更高（要导出到 Max 时）
+- Epic「MetaHuman for Maya」（要用菜单「导入 MH」时；从 Fab 安装）
+- 角色数据：UE 5.6+ DCC Export 的 ZIP/文件夹，或已经装配好的 Maya 场景
 
-姿势保真（1.3.1）
-- 导出 Morph 前强制归零全部滑杆轴：任何遗留姿势都会污染所有烘焙目标（曾导致 Max/Maya 同姿势不同结果）
-- MorphTargets/mh2max_bake.version 版本戳：烘焙逻辑升级时自动清空旧 OBJ 全量重烘，杜绝脏缓存
-- 二维控制器（mouth/jaw/eye 等）每个角落额外烘焙「残差」目标（<ctrl>.comboX?Y?），
-  Max 用 |x|·|y| 双线性权重接线，补上 RigLogic 的非线性角落校正
+本仓库不含约 1.5GB 的 MetaHuman for Maya 压缩包。请到 GitHub Releases 下载
+MetaHumanForMaya-1.3.1-win64.zip，放到本仓库 vendor\ 目录。
 
-Max 场景归档（1.3.2）
-- 一键导出不再写单个 `_face_rigged.max`，改为按版本归档：
-  - 当前 Max 年：`{角色}_face_rigged_max{年}.max`（如 _max2026.max）
-  - 若当前 Max > 2024：额外尝试 `_max2024.max`（saveAsVersion:2024；失败则只保留当前版）
-  - 若当前就是 2024：仅写入 `_max2024.max` 一份
-- Max 2026 down-save 前会自动对齐 Gamma/Linear 渲染输出默认（避免颜色管理阻塞弹窗）
+
+三、安装
+--------
+推荐：双击仓库里的 install.bat
+- 扫描 Maya / Max，默认全部安装
+- 找不到时可以粘贴快捷方式或 3dsmax.exe 路径
+- 多个 Max 时可选择默认导出版本
+- 配置写在 %LOCALAPPDATA%\mh2max\config.json
+
+手动安装：
+1. 把 mh2max.mod.example 复制到
+   %USERPROFILE%\Documents\maya\modules\mh2max.mod
+2. 编辑该文件，把路径改成你的仓库绝对路径（例如 C:\Users\A\Tools\mh2max）
+3. 建议把 userSetup.example.py 里的代码加进
+   Documents\maya\scripts\userSetup.py
+   （主窗口起来后再装菜单，避免卡在启动屏）
+4. 按 Epic 文档安装 MetaHuman for Maya
+5. 重启 Maya，顶栏应出现 MH2Max
+
+插件不会再写进 Maya「文件」菜单，以免把系统菜单弄坏。
+
+
+四、Maya 已经开着，如何刷新菜单（reload_menu.py）
+------------------------------------------------
+改过插件代码或刚更新仓库后，不必关掉 Maya。
+
+1. Maya 菜单：窗口 → 常规编辑器 → 脚本编辑器
+2. 切到 Python 页签
+3. 执行（把路径改成你的仓库路径）：
+
+   exec(open(r"C:\Users\A\Tools\mh2max\reload_menu.py", encoding="utf-8").read())
+
+也可以把 reload_menu.py 直接拖进 Python 页签再点执行。
+
+成功标志：
+- 脚本编辑器打印 [mh2max] File menu restored ...
+- 顶栏 MH2Max 里第一项显示 mh2max v1.3.31
+
+若「文件」菜单只剩 MetaHuman 相关项，同样运行上述脚本即可恢复。
+
+
+五、菜单说明
+------------
+MH2Max（或 Epic 的 MetaHuman 菜单内）：
+
+- mh2max v版本号     当前已加载的插件版本（不可点）
+- 导入 MH            导入 UE DCC Export（ZIP 或文件夹）并装配
+- 检测当前角色       检查场景；非标准角色可标准化
+- 导出至 3ds Max     需先检测成功或导入成功
+- UE5控制器同步      打开 Maya→UE 控制器同步面板（需本机有对应工程）
+- 显示控制器/隐藏控制器  显示或隐藏身体与面部控制器
+- 检查更新           查询 GitHub Releases
+
+使用顺序：导入或打开场景 → 检测当前角色 → 导出至 3ds Max。
+
+
+六、导入 MH
+-----------
+1. 必须先装好 MetaHuman for Maya
+2. MH2Max → 导入 MH → 选 ZIP 或文件夹
+3. 文件夹可以是导出根目录，也可以是父目录
+   （自动找 ExportManifest.json 或 head.dna + body.dna）
+4. 过程目录默认在源旁边：MHI_<名称>\
+   已存在则询问覆盖，或自动加 _2 等后缀
+5. 装配走 Character Assembler，不能用旧 DHI CharacterImporter 直接装 UE 5.6+ 包
+
+不要同时开两个 Maya。
+
+
+七、检测与标准化
+----------------
+检测通过：可以直接导出。
+
+检测失败（自定义角色）：会询问是否标准化。
+- 不改原控制器名、骨骼名
+- 为面部 FRM + *_Ctrl 建立隐藏的 CTRL_* 代理，供 Max Morph 接线
+- 网格映射写入场景；导出任务会带上真实网格短名（如 SM_Male_Head_01）
+
+
+八、导出至 3ds Max
+------------------
+Maya 侧：
+- 先把全部滑杆归零再烘焙，避免脏姿势污染 Morph
+- 导出脸、牙、唾液/牙龈、眼睛等相关网格的 Morph
+- 二维控制器每个角落再烘一份残差目标，Max 用双线性权重接线
+- FBX 标明 Y 向上，不在 Maya 里先转成 Z 向上
+
+Max 侧：
+- 导入 FBX 时轴转换到 Z 向上（整棵根层级一起转）
+- Morph OBJ 绕 X 轴转 -90 度，与角色对齐
+- 单个 Morpher 接线（通道超过 100 会扩容，避免多层 Morpher 叠坏脸）
+- 不给 FACIAL 骨骼写脚本控制器，保护 Skin 绑定
+- 按版本保存：{角色}_face_rigged_max{年}.max
+  Max 高于 2024 时再尝试一份 _max2024.max
+
+改轴向或 Morph 逻辑后，必须从 Maya 重新点「导出至 3ds Max」。
+旧 FBX、旧 .max 不要热修凑合。
+
+导入日志中有 fbx Z-up probe … (standing: Z > Y)
+站立角色的包围盒高度应在 Z，而不是躺在 Y 上。
+
+
+九、轴向要点（1.3.31）
+----------------------
+Maya = Y 向上，Max = Z 向上。
+
+正确做法：Maya 按 Y 向上写出 FBX，Max 导入时转到 Z 向上。
+错误做法：在 Maya 里先把角色转成 Z 向上再导出（会转两次）。
+
+身体控制器目前不在 Max 里重建 Maya 的约束和 IK，以 FBX 层级为准。
+面部表情走 Morph，不靠改面部骨骼。
+
+
+十、常见问题
+------------
+Q：菜单还是旧版本？
+A：运行 reload_menu.py，或重启 Maya。看菜单第一项的版本号。
+
+Q：导出是灰的点不了？
+A：先「检测当前角色」成功，或先「导入 MH」成功。
+
+Q：角色在 Max 里躺倒 90 度？
+A：确认已是 v1.3.31，并且是重新导出、重新导入的，不是旧 FBX。
+
+Q：Max 里拖 CTRL 没表情？
+A：多半没烘到 Morph（自定义网格名未进任务表）。先做标准化再重新导出。
+
+Q：导入 MH 失败？
+A：确认已装 MetaHuman for Maya，且用的是 UE 5.6+ DCC Export，不是旧 DHI 包。
+
+Q：UE5控制器同步打不开？
+A：该功能要读本机 MeshToMetahuman 工程里的脚本；没有该工程会提示找不到文件。这不影响导出到 Max。

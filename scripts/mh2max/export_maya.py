@@ -18,6 +18,22 @@ from .detect import (
 from .poses import POSE_JOBS
 
 
+def _mesh_resolve(mesh_name, info=None):
+    """Resolve mesh by MH logical name, honoring standardize map / detect head_parts."""
+    if info:
+        parts = info.get("head_parts") or {}
+        if mesh_name in parts and parts[mesh_name]:
+            return parts[mesh_name]
+        mmap = info.get("mesh_map") or {}
+        if mesh_name in mmap and mmap[mesh_name]:
+            n = resolve(mmap[mesh_name])
+            if n:
+                return n
+        if mesh_name == "head_lod0_mesh" and info.get("head"):
+            return info["head"]
+    return resolve(mesh_name)
+
+
 def _log(log_path, msg):
     line = "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
     print(line)
@@ -146,6 +162,35 @@ def _attr_valid(attr, value):
     return True
 
 
+def _mirror_lr_pose_jobs(pose_map, log_path):
+    """If scan found CTRL_L_* but missed CTRL_R_* (or vice versa), mirror the jobs."""
+    added = 0
+    for folder in list(pose_map.keys()):
+        poses = list(pose_map.get(folder) or [])
+        seen = set(poses)
+        extra = []
+        for attr, v in poses:
+            alt = None
+            if attr.startswith("CTRL_L_"):
+                alt = attr.replace("CTRL_L_", "CTRL_R_", 1)
+            elif attr.startswith("CTRL_R_"):
+                alt = attr.replace("CTRL_R_", "CTRL_L_", 1)
+            if not alt or alt == attr:
+                continue
+            pair = (alt, v)
+            if pair in seen:
+                continue
+            if _attr_valid(alt, v):
+                extra.append(pair)
+                seen.add(pair)
+                added += 1
+        if extra:
+            pose_map[folder] = poses + extra
+    if added:
+        _log(log_path, "posejobs L/R mirror added=%s" % added)
+    return pose_map
+
+
 def _slider_axes():
     """Enumerate every settable GUI slider axis with its limit range.
 
@@ -242,7 +287,7 @@ def _combo_pairs(poses):
     return combos
 
 
-MORPH_BAKE_VERSION = "1.3.1"
+MORPH_BAKE_VERSION = "1.3.9"
 
 
 def _zero_all_sliders(log_path):
@@ -309,17 +354,26 @@ def _check_bake_version(out_dir, log_path):
         f.write(MORPH_BAKE_VERSION)
 
 
-def build_pose_jobs(out_dir, log_path):
+def build_pose_jobs(out_dir, log_path, info=None):
     """Scan the live rig: which slider pose deforms which MESH_JOBS mesh.
 
     Replaces the hand-written POSE_JOBS tables (whose stale control names caused
     20 failed morphs and 67 uncovered sliders on UE 5.8 rigs). Result is cached
     in <out_dir>/mh2max_posejobs.json keyed by the slider/mesh fingerprint.
+
+    info: detect_scene() dict — required for standardized custom meshes
+    (SM_Male_Head_01 etc.); plain resolve(head_lod0_mesh) finds nothing there.
     """
     axes = _slider_axes()
-    meshes = [(folder, resolve(mesh_name)) for folder, mesh_name in MESH_JOBS]
-    meshes = [(f, m) for f, m in meshes if m]
-    key_src = json.dumps([MORPH_BAKE_VERSION, axes, [f for f, _ in meshes]], sort_keys=True)
+    meshes = []
+    for folder, mesh_name in MESH_JOBS:
+        m = _mesh_resolve(mesh_name, info)
+        if m:
+            meshes.append((folder, m, short_name(m)))
+    key_src = json.dumps(
+        [MORPH_BAKE_VERSION, axes, [(f, sn) for f, _, sn in meshes]],
+        sort_keys=True,
+    )
     key = hashlib.md5(key_src.encode("utf-8")).hexdigest()
 
     cache_path = os.path.join(out_dir, "mh2max_posejobs.json")
@@ -327,27 +381,38 @@ def build_pose_jobs(out_dir, log_path):
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
         if cached.get("key") == key:
-            _log(log_path, "posejobs cache hit (%s)" % cache_path)
-            return {f: [tuple(p) for p in ps] for f, ps in cached["jobs"].items()}
+            jobs = {f: [tuple(p) for p in ps] for f, ps in (cached.get("jobs") or {}).items()}
+            n = sum(len(v) for v in jobs.values())
+            if n > 0:
+                _log(log_path, "posejobs cache hit (%s jobs=%s)" % (cache_path, n))
+                return jobs
+            _log(log_path, "posejobs cache empty — rescanning")
     except Exception:
         pass
 
-    _log(log_path, "posejobs scan: axes=%s meshes=%s" % (len(axes), len(meshes)))
+    if not meshes:
+        _log(
+            log_path,
+            "posejobs: no MESH_JOBS meshes resolved (check standardize map / head mesh)",
+        )
+        return {}
+
+    _log(log_path, "posejobs scan: axes=%s meshes=%s" % (len(axes), [(f, sn) for f, _, sn in meshes]))
     base = {}
-    for folder, mesh in meshes:
+    for folder, mesh, _sn in meshes:
         base[folder] = _mesh_sig(mesh)
-    jobs = {folder: [] for folder, _ in meshes}
+    jobs = {folder: [] for folder, _, _ in meshes}
     for attr, vals in axes:
         for v in vals:
             if not _set_ctrl(attr, v):
                 _log(log_path, "posejobs skip unsettable %s=%s" % (attr, v))
                 continue
-            for folder, mesh in meshes:
+            for folder, mesh, _sn in meshes:
                 if _sig_moved(base[folder], _mesh_sig(mesh)):
                     jobs[folder].append((attr, v))
             _set_ctrl(attr, 0)
-    for folder, _ in meshes:
-        _log(log_path, "posejobs %s=%s" % (folder, len(jobs[folder])))
+    for folder, _, sn in meshes:
+        _log(log_path, "posejobs %s(%s)=%s" % (folder, sn, len(jobs.get(folder) or [])))
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump({"key": key, "jobs": jobs}, f, ensure_ascii=False, indent=1)
@@ -437,7 +502,7 @@ def _export_combo_objs(combo_jobs, log_path, progress_cb=None, done=0, total=0):
     return exported, failed, skipped
 
 
-def export_morphs(out_dir, log_path, progress_cb=None, face_only=True):
+def export_morphs(out_dir, log_path, progress_cb=None, face_only=True, info=None):
     """Bake per-head-part Morph OBJs for one-click Max assembly.
 
     face_only=True (default for 一键导出): export every MESH_JOBS head part
@@ -447,6 +512,8 @@ def export_morphs(out_dir, log_path, progress_cb=None, face_only=True):
 
     face_only=False is reserved for a future full-body morph pass; today it
     still walks the same MESH_JOBS table.
+
+    info: optional detect_scene() dict (mesh_map / head_parts for custom rigs).
     """
     _ensure_plugin("objExport")
     # Neutral scene + fresh bake when logic changed: both are hard requirements
@@ -456,14 +523,29 @@ def export_morphs(out_dir, log_path, progress_cb=None, face_only=True):
     # Live-rig pose scan first (control names differ across MetaHuman versions);
     # static POSE_JOBS is only a fallback, filtered against the actual rig.
     try:
-        pose_map = build_pose_jobs(out_dir, log_path)
+        pose_map = build_pose_jobs(out_dir, log_path, info=info)
+        pose_map = _mirror_lr_pose_jobs(pose_map, log_path)
         pose_src = "scan"
+        npose = sum(len(v) for v in pose_map.values())
+        if npose == 0:
+            raise RuntimeError("pose scan returned 0 jobs (meshes unresolved or no deformation)")
     except Exception as ex:
         _log(log_path, "posejobs scan failed, fallback to static tables: %s" % ex)
         pose_map = {}
         for folder, plist in POSE_JOBS:
             pose_map[folder] = [(a, v) for a, v in plist if _attr_valid(a, v)]
         pose_src = "static-filtered"
+        # If static also empty (custom CTRL names), use every live slider axis on Face
+        if sum(len(v) for v in pose_map.values()) == 0:
+            axes = _slider_axes()
+            face_poses = []
+            for attr, vals in axes:
+                for v in vals:
+                    face_poses.append((attr, v))
+            if face_poses:
+                pose_map = {"Face": face_poses}
+                pose_src = "all-axes-face"
+                _log(log_path, "posejobs fallback all-axes-face=%s" % len(face_poses))
     _log(log_path, "pose source=%s" % pose_src)
     exported = failed = skipped = 0
     jobs = []
@@ -472,7 +554,7 @@ def export_morphs(out_dir, log_path, progress_cb=None, face_only=True):
     _ = face_only  # kept for API compatibility with pipeline.run_export
     for folder, mesh_name in MESH_JOBS:
         poses = pose_map.get(folder) or []
-        mesh = resolve(mesh_name)
+        mesh = _mesh_resolve(mesh_name, info)
         if not mesh:
             _log(log_path, "skip mesh missing %s (%s)" % (folder, mesh_name))
             continue
@@ -488,7 +570,7 @@ def export_morphs(out_dir, log_path, progress_cb=None, face_only=True):
     # Corner-combo residual targets (bilinear correctives for 2D controls)
     combo_jobs = []
     for folder, mesh_name in MESH_JOBS:
-        mesh = resolve(mesh_name)
+        mesh = _mesh_resolve(mesh_name, info)
         if not mesh:
             continue
         dest = os.path.join(out_dir, "MorphTargets", folder)
@@ -579,6 +661,10 @@ def _unique(seq):
 
 def export_character_fbx(path, info, log_path):
     _ensure_plugin("fbxmaya")
+    return _export_character_fbx_impl(path, info, log_path)
+
+
+def _export_character_fbx_impl(path, info, log_path):
     sel = []
     for key in ("head", "body", "body_grp", "head_grp", "gui", "gui_grp", "combined", "flipflops"):
         n = info.get(key)
@@ -586,6 +672,55 @@ def export_character_fbx(path, info, log_path):
             sel.append(n)
     for n in (info.get("head_parts") or {}).values():
         sel.append(n)
+
+    # MESH_JOBS (incl. standardize map → custom names like SM_Male_Head_01)
+    for folder, mesh_name in MESH_JOBS:
+        mesh = _mesh_resolve(mesh_name, info)
+        if mesh:
+            sel.append(mesh)
+
+    # Standardized extras (legs/hands/clothes) — Body_01 is often torso-only
+    for n in info.get("extra_meshes") or []:
+        if n:
+            sel.append(n)
+    for sn in (info.get("mesh_map") or {}).values():
+        r = resolve(sn) if sn else None
+        if r:
+            sel.append(r)
+    try:
+        from .standardize import _load_map
+
+        std = _load_map() or {}
+        for sn in std.get("extra_meshes") or []:
+            r = resolve(sn)
+            if r:
+                sel.append(r)
+        br = std.get("body_root")
+        if br:
+            r = resolve(br)
+            if r:
+                sel.append(r)
+    except Exception:
+        pass
+
+    # All character meshes (custom SM_/SP_/OS_ etc.), not only *lod0*
+    for n in cmds.ls(type="transform", long=True) or []:
+        sn = short_name(n)
+        low = sn.lower()
+        if low.startswith("mh2max_") or "combined" in low or "flipflop" in low:
+            continue
+        shapes = cmds.listRelatives(n, shapes=True, ni=True) or []
+        if not any(cmds.nodeType(sh) == "mesh" for sh in shapes):
+            continue
+        if (
+            "lod0" in low
+            or sn.startswith(("SM_", "SP_", "OS_", "SK_"))
+            or any(
+                t in low
+                for t in ("leg", "hand", "foot", "shoe", "pant", "body", "head", "cloth", "hair")
+            )
+        ):
+            sel.append(n)
 
     # All visible lod0 meshes (head/body parts); skip combined duplicates later in Max
     for n in (cmds.ls("*lod0*", type="transform", long=True) or []) + (
@@ -602,6 +737,9 @@ def export_character_fbx(path, info, log_path):
         "GRP_faceGUI",
         "CTRL_faceGUI",
         "FRM_faceGUI",
+        "FaceGUI_Ctrl",
+        "Master_Ctrl",
+        "COG_Ctrl",
         "headGui_grp",
         "headRig_grp",
         "geometry_grp",
@@ -627,6 +765,8 @@ def export_character_fbx(path, info, log_path):
     sel.extend(cmds.ls("*:CTRL_*", type="transform") or [])
     sel.extend(cmds.ls("FRM_*", type="transform") or [])
     sel.extend(cmds.ls("*:FRM_*", type="transform") or [])
+    sel.extend(cmds.ls("*_Ctrl", type="transform") or [])
+    sel.extend(cmds.ls("*:*_Ctrl", type="transform") or [])
 
     # Full skeleton (body + face) including MHBody / MHHead namespaces
     for j in cmds.ls(type="joint", long=True) or []:
@@ -644,6 +784,11 @@ def export_character_fbx(path, info, log_path):
         os.makedirs(folder)
     fbx = path.replace("\\", "/")
     try:
+        # File stays Maya Y-up. Max (Z-up) converts the whole hierarchy on import
+        # (meshes / joints / controllers / IK / Skin) so it matches Morph OBJ -90 X.
+        # Do NOT export as Z-up here: Max would convert again and double-rotate.
+        mel.eval("FBXExportUpAxis y")
+        mel.eval("FBXExportAxisConversionMethod none")
         mel.eval("FBXExportSmoothingGroups -v true")
         mel.eval("FBXExportSmoothMesh -v false")
         mel.eval("FBXExportSkins -v true")
@@ -667,6 +812,18 @@ def _ms_escape(s):
 
 
 def write_job_files(out_dir, info, paths):
+    # morph mesh overrides for custom standardized rigs (logical -> real short name)
+    morph_meshes = []
+    for folder, mesh_name in MESH_JOBS:
+        real = _mesh_resolve(mesh_name, info)
+        morph_meshes.append(
+            {
+                "folder": folder,
+                "logical": mesh_name,
+                "mesh": short_name(real) if real else mesh_name,
+            }
+        )
+
     job = {
         "character": info.get("character"),
         "body_type": info.get("body_type"),
@@ -682,6 +839,7 @@ def write_job_files(out_dir, info, paths):
             "combined": short_name(info.get("combined")) or "",
             "flipflops": short_name(info.get("flipflops")) or "",
         },
+        "morph_meshes": morph_meshes,
         "bbox": info.get("bbox"),
         "world": info.get("world"),
         "paths": paths,
@@ -698,6 +856,28 @@ def write_job_files(out_dir, info, paths):
     p = paths
     body = n["body"]
     combined = n["combined"]
+    # MaxScript array: #(#("prefix", "meshName", "label"), ...)
+    _LABEL = {
+        "Face": "face",
+        "Teeth": "teeth",
+        "Saliva": "saliva",
+        "EyeLeft": "eyeLeft",
+        "EyeRight": "eyeRight",
+        "EyeLash": "eyeLash",
+        "EyeShell": "eyeShell",
+        "EyeEdge": "eyeEdge",
+        "Cartilage": "cartilage",
+    }
+    mm_lines = []
+    for row in morph_meshes:
+        pref = "" if row["folder"] == "Face" else (row["folder"] + "_")
+        label = _LABEL.get(row["folder"], (row["folder"] or "face").lower())
+        mm_lines.append(
+            '#("%s", "%s", "%s")'
+            % (_ms_escape(pref), _ms_escape(row["mesh"]), _ms_escape(label))
+        )
+    morph_jobs_ms = "#(\n    " + ",\n    ".join(mm_lines) + "\n)"
+
     ms = u"""-- auto-generated by mh2max
 -- -U MAXScript runs after Max UI exists. Use .NET timer (global tick fn) to paint first frame.
 global mh2max_outDir = @"%s"
@@ -717,6 +897,7 @@ global mh2max_combined = "%s"
 global mh2max_character = "%s"
 global mh2max_bodyType = "%s"
 global mh2max_pipelinePath = @"%s"
+global mh2max_morphMeshJobsOverride = %s
 global mh2max_bootDone = false
 global mh2max_bootTimer = undefined
 
@@ -769,6 +950,7 @@ try (
         info.get("character") or "MetaHuman",
         info.get("body_type") or "unknown",
         pipeline_ms,
+        morph_jobs_ms,
     )
     with open(job_ms, "w", encoding="utf-8") as f:
         f.write(ms)

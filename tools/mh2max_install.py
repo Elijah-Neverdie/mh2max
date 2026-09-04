@@ -250,7 +250,7 @@ def install_mh2max_module(maya_modules=None):
         os.makedirs(maya_modules)
     mod_path = os.path.join(maya_modules, "mh2max.mod")
     root = ROOT.replace("\\", "/")
-    content = "+ mh2max 1.3.3 %s\nplug-ins: plug-ins\nscripts: scripts\n" % root
+    content = "+ mh2max 1.3.15 %s\nplug-ins: plug-ins\nscripts: scripts\n" % root
     with open(mod_path, "w", encoding="utf-8") as fh:
         fh.write(content)
     print("[ok] mh2max.mod -> %s" % mod_path)

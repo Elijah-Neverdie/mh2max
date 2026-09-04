@@ -46,6 +46,11 @@ max/mh2max_unify_*
 
 # Local screenshots / dev artifacts
 _*.png
+max_viewport*.png
+tmp_*.py
+.trae/
+PLAN_v1.3.23.md
+.commitmsg.txt
 run_character.mel
 
 # OS / IDE

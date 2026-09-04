@@ -2,6 +2,16 @@
 -- Generic MetaHuman Max assembly. Driven by globals from mh2max_job.ms.
 -- No Max UI / bone-toggle buttons.
 --
+-- v1.3.31:
+--   * Maya Y-up FBX → Max Z-up via FBX AxisConversion on all roots
+--     (meshes / joints / controllers / IK / Skin stay in one converted hierarchy).
+--   * Morph OBJ already rotate -90 X; do not convert FBX as Y-up or the character lies down.
+-- v1.3.29:
+--   * Revert Max-side body controller wiring (mh2max_body_drive / Pos/Ori / IK chains).
+-- v1.3.28:
+--   * Force consistent FBX import settings to avoid cross-run distortion.
+--   * Avoid "$" selection when importing morph OBJs; find newly imported object by diff.
+--
 -- Slider limits v5 (one-click export):
 --   * All FRM sliders incl. lookAt/rigLogic/convergence/followHead get float_limit
 --   * Unused axes pinned 0..0 (both enables); segments honor Maya elo/ehi as-is
@@ -258,6 +268,13 @@ fn detachKeepWorld obj = (
     true
 )
 
+fn wireBodyLinksFromFile = (
+    -- v1.3.29: reverted body controller optimizations (v1.3.12–v1.3.28).
+    -- Body rig comes from FBX import only; face still uses Morph + CTRL_* wiring.
+    logf "body wire: skipped (body drive disabled)"
+    0
+)
+
 fn ensureLayer nm = (
     local ly = LayerManager.getLayerFromName nm
     if ly == undefined then ly = LayerManager.newLayerFromName nm
@@ -298,6 +315,8 @@ fn parseMorphName n = (
 
 -- One-click morph mesh table (Maya MESH_JOBS). Face has empty prefix.
 -- #(prefix, meshName, label)
+-- Job file may set mh2max_morphMeshJobsOverride before fileIn (custom standardized meshes).
+global mh2max_morphMeshJobsOverride
 global mh2max_morphMeshJobs = #(
     #("", "head_lod0_mesh", "face"),
     #("Teeth_", "teeth_lod0_mesh", "teeth"),
@@ -308,6 +327,10 @@ global mh2max_morphMeshJobs = #(
     #("EyeShell_", "eyeshell_lod0_mesh", "eyeShell"),
     #("EyeEdge_", "eyeEdge_lod0_mesh", "eyeEdge"),
     #("Cartilage_", "cartilage_lod0_mesh", "cartilage")
+)
+if mh2max_morphMeshJobsOverride != undefined and (classOf mh2max_morphMeshJobsOverride) == Array then (
+    mh2max_morphMeshJobs = mh2max_morphMeshJobsOverride
+    format "mh2max: morph mesh jobs override count=%\n" mh2max_morphMeshJobs.count
 )
 
 fn mh2max_resolveMesh nm = (
@@ -329,6 +352,10 @@ fn mh2max_cmpMorph a b = stricmp a.name b.name
 fn mh2max_bucketMorphTargets = (
     -- Returns array parallel to mh2max_morphMeshJobs: each entry is #(mesh, targetsArray)
     local buckets = #()
+    if (classOf mh2max_morphMeshJobs) != Array or mh2max_morphMeshJobs.count == 0 then (
+        logf "WARN mh2max_morphMeshJobs is empty; skipping morph bucketing"
+        return buckets
+    )
     for j = 1 to mh2max_morphMeshJobs.count do (
         local job = mh2max_morphMeshJobs[j]
         local meshNode = mh2max_resolveMesh job[2]
@@ -537,14 +564,34 @@ fn applyLimitFloat ctrl axisName lower upper eLo eHi = (
     true
 )
 
+fn isFaceOriginalCtrl o = (
+    -- Custom face BS drivers are named *_Ctrl under FRM_* (or have a CTRL_* proxy).
+    -- Body / IK / FK controllers are also often *_Ctrl — must NOT freeze those.
+    if o == undefined then return false
+    local nm = o.name
+    if not (matchPattern nm pattern:"*_Ctrl") then return false
+    if matchPattern nm pattern:"CTRL_*" then return false
+    if o.parent != undefined and (matchPattern o.parent.name pattern:"FRM_*") then return true
+    -- proxy naming: R_mouth_cornerPull_Ctrl → CTRL_R_mouth_cornerPull
+    if nm.count > 5 then (
+        local stem = substring nm 1 (nm.count - 5)
+        local proxy = getNodeByName ("CTRL_" + stem) exact:true ignoreCase:false
+        if proxy != undefined then return true
+    )
+    false
+)
+
 fn freezeGuiDecor = (
-    -- Freeze panel frames / labels; keep slider CTRL_* knobs selectable
+    -- Freeze panel frames / labels; keep slider CTRL_* knobs selectable.
+    -- Hide only face original *_Ctrl (Maya BS drivers) — Morph wires to CTRL_*.
+    -- Do NOT freeze body / IK / FK *_Ctrl (Master_Ctrl, COG_Ctrl, etc.).
     local n = 0
     mh2max_clampBusy = true
     clearSelection()
     for o in objects do (
         local nm = o.name
         local doFreeze = false
+        local doHide = false
         if matchPattern nm pattern:"FRM_*" then doFreeze = true
         else if matchPattern nm pattern:"TEXT_*" then doFreeze = true
         else if matchPattern nm pattern:"GRP_faceGUI*" then doFreeze = true
@@ -553,17 +600,33 @@ fn freezeGuiDecor = (
         else if nm == "CTRL_faceTweakersGUI" then doFreeze = true
         else if (isGuiFollowSlider nm) then doFreeze = false
         else if matchPattern nm pattern:"CTRL_*GUI*" and not (::isSliderCtrl nm) then doFreeze = true
+        else if (isFaceOriginalCtrl o) then (
+            doFreeze = true
+            doHide = true
+        )
         else if (classOf o == Text or classOf o == text or classOf o == Shape or classOf o == Editable_Spline or classOf o == line or classOf o == Line) then (
-            if not (matchPattern nm pattern:"CTRL_*") then doFreeze = true
+            -- decor curves only — never body controllers named *_Ctrl
+            if (not matchPattern nm pattern:"CTRL_*") and (not matchPattern nm pattern:"*_Ctrl") then doFreeze = true
         )
         if doFreeze then (
             try ( freeze o ) catch ()
             try ( setTransformLockFlags o #{1,2,3,4,5,6,7,8,9} ) catch ()
             n += 1
         )
+        if doHide then (try ( hide o ) catch ())
     )
     for o in objects do (
-        if (::isSliderCtrl o.name) or (isGuiFollowSlider o.name) then (try ( unfreeze o ) catch ())
+        if (::isSliderCtrl o.name) or (isGuiFollowSlider o.name) then (
+            try ( unfreeze o ) catch ()
+            try ( unhide o ) catch ()
+            try ( setTransformLockFlags o #{} ) catch ()
+        )
+        else if (matchPattern o.name pattern:"*_Ctrl") and (not matchPattern o.name pattern:"CTRL_*") and (not (isFaceOriginalCtrl o)) then (
+            -- restore body / IK / FK controllers if an older pipeline froze them
+            try ( unfreeze o ) catch ()
+            try ( unhide o ) catch ()
+            try ( setTransformLockFlags o #{} ) catch ()
+        )
     )
     mh2max_clampBusy = false
     n
@@ -733,10 +796,10 @@ fn mh2max_frameFaceFront head = (
 )
 
 fn mh2max_showOnlyRenderable keepNodes:#() = (
-    -- Viewport: only objects marked renderable (hides bones/helpers/CTRL board etc.)
+    -- Viewport: hide bones/helpers noise, but KEEP face/body controller shapes visible.
     try ( hideByCategory.bones = true ) catch ()
     try ( hideByCategory.helpers = true ) catch ()
-    try ( hideByCategory.shapes = true ) catch ()
+    try ( hideByCategory.shapes = false ) catch () -- CTRL / FRM / *_Ctrl are Shapes
     try ( hideByCategory.lights = true ) catch ()
     try ( hideByCategory.warps = true ) catch ()
     try ( hideByCategory.particleSystems = true ) catch ()
@@ -744,17 +807,29 @@ fn mh2max_showOnlyRenderable keepNodes:#() = (
     local nShow = 0
     for o in objects do (
         local keep = false
+        local nm = o.name
         for k in keepNodes where (k != undefined and isValidNode k) do (
             if o == k then keep = true
             try ( if o == k.target then keep = true ) catch ()
         )
+        if (not keep) and nm != undefined and nm != "" then (
+            if matchPattern nm pattern:"CTRL_*" then keep = true
+            else if matchPattern nm pattern:"FRM_*" then keep = true
+            else if matchPattern nm pattern:"*_Ctrl" then keep = true
+            else if matchPattern nm pattern:"GRP_faceGUI*" then keep = true
+            else if matchPattern nm pattern:"mh2max_*" then keep = true
+        )
         if keep then (
             try ( unhide o ) catch ()
+            nShow += 1
         ) else (
             local ren = true
             try ( ren = o.renderable ) catch ( ren = true )
-            if (superClassOf o == Helper) or (superClassOf o == Shape) then ren = false
+            -- Hide non-mesh helpers; keep Geometry always
+            if (superClassOf o == Helper) then ren = false
             if (classOf o == BoneGeometry) or (classOf o == Dummy) or (classOf o == Point) then ren = false
+            -- Random shapes (not ctrl) stay hidden for clean viewport
+            if (superClassOf o == Shape) then ren = false
             if ren then (
                 try ( unhide o ) catch ()
                 nShow += 1
@@ -1000,9 +1075,35 @@ mh2max_clampBusy = false
 mh2max_clampCtrls = #()
 
 if not doesFileExist mxFbx then throw ("MISSING FBX " + mxFbx)
+-- v1.3.31: Maya file is Y-up; Max host is always Z-up.
+-- FBX rotates each imported ROOT 90 deg so the whole tree (Skin/IK/ctrls/joints) stands up.
+-- Morph OBJ import already applies the same Y-up→Z-up as eulerAngles -90 0 0.
+-- UpAxis "Y" (v1.3.28) skipped that conversion and left the character on its side.
+try (
+    FBXImporterSetParam "ResetImport"
+    FBXImporterSetParam "AxisConversion" true
+    FBXImporterSetParam "UpAxis" "Z"
+    FBXImporterSetParam "Skin" true
+    FBXImporterSetParam "SmoothingGroups" true
+    FBXImporterSetParam "Mode" #create
+    FBXImporterSetParam "Animation" false
+    FBXImporterSetParam "Cameras" false
+    FBXImporterSetParam "Lights" false
+) catch (
+    logf ("WARN FBXImporterSetParam failed: " + (getCurrentException() as string))
+)
 mh2max_prog 8 "导入 FBX 角色…"
 importFile mxFbx #noprompt
 logf ("imported fbx objects=" + (objects.count as string))
+try (
+    local probe = getNodeByName mxBodyName
+    if probe == undefined then probe = getNodeByName "SM_Male_Body_01"
+    if probe == undefined then probe = getNodeByName "body_lod0_mesh"
+    if probe != undefined then (
+        local sz = probe.max - probe.min
+        logf ("fbx Z-up probe " + probe.name + " size=" + (sz as string) + " (standing: Z > Y)")
+    )
+) catch ()
 
 -- Morph OBJs (Face + Teeth + optional eye folders)
 mh2max_prog 12 "准备 Morph 目标…"
@@ -1039,14 +1140,20 @@ importedCnt = 0
         mi += 1
         local n = getFilenameFile f
         if (getNodeByName n) == undefined then (
+            -- v1.3.28: do not trust "$" selection; find the newly imported object by diff.
+            local beforeObjs = objects as array
             importFile f #noprompt
-            if $ != undefined then (
-                $.name = n
-                rotate $ (eulerAngles -90 0 0)
-                resetXForm $
-                collapseStack $
-                theLayer.addNode $
-                hide $
+            local newObj = undefined
+            for o in objects do (
+                if (findItem beforeObjs o) == 0 then (newObj = o; exit)
+            )
+            if newObj != undefined then (
+                newObj.name = n
+                rotate newObj (eulerAngles -90 0 0)
+                resetXForm newObj
+                collapseStack newObj
+                theLayer.addNode newObj
+                hide newObj
                 importedCnt += 1
             )
         )
@@ -1063,35 +1170,37 @@ head = nodeBy mxHeadName
 if head == undefined then head = findByPattern "head_lod0_mesh"
 if head == undefined then throw "head_lod0_mesh missing"
 
-morphBuckets = mh2max_bucketMorphTargets()
--- Keep legacy head alias if bucket resolved a mesh
-if morphBuckets.count >= 1 and morphBuckets[1][1] != undefined then head = morphBuckets[1][1]
-targetLog = "targets"
-for j = 1 to mh2max_morphMeshJobs.count do (
-    targetLog += " " + mh2max_morphMeshJobs[j][3] + "=" + (morphBuckets[j][2].count as string)
+morphBuckets = #()
+try (
+    morphBuckets = mh2max_bucketMorphTargets()
+    -- Keep legacy head alias if bucket resolved a mesh
+    if morphBuckets.count >= 1 and morphBuckets[1][1] != undefined then head = morphBuckets[1][1]
+    targetLog = "targets"
+    for j = 1 to mh2max_morphMeshJobs.count do (
+        targetLog += " " + mh2max_morphMeshJobs[j][3] + "=" + (morphBuckets[j][2].count as string)
+    )
+    logf targetLog
+) catch (
+    logf ("WARN morph bucket failed: " + (getCurrentException() as string))
+    morphBuckets = #()
 )
-logf targetLog
 
 fn buildAndWireMorphs meshNode targets label = (
     if meshNode == undefined or targets.count == 0 then return #(0, 0)
-    -- Dynamic pose scan can exceed 200 channels: allocate Morphers on demand
-    local morphMods = #()
+    -- IMPORTANT (Max 2017+): one Morpher can hold >100 channels by BuildFromNode(ch>100).
+    -- Stacking multiple Morphers is NOT safely additive — jaw+eye (and similar) nonlinearly
+    -- blows up mid-face (measured ~2x jaw delta in wrong direction). Keep a single Morpher.
     local wiredL = 0
     local failedL = 0
-    local chUsed = 0
+    local morphMod = Morpher()
+    addModifier meshNode morphMod
+    if targets.count > 100 then (
+        logf ("morpher " + label + " channels=" + (targets.count as string) + " (expand past 100)")
+    )
     for i = 1 to targets.count do (
         local nd = targets[i]
         local inf = parseMorphName nd.name
-        chUsed += 1
-        local mIdx = ((chUsed - 1) / 100) + 1
-        while morphMods.count < mIdx do (
-            local mNew = Morpher()
-            addModifier meshNode mNew
-            append morphMods mNew
-            if morphMods.count > 1 then logf ("added morpher #" + (morphMods.count as string) + " on " + label)
-        )
-        local morphMod = morphMods[mIdx]
-        local ch = chUsed - ((mIdx - 1) * 100)
+        local ch = i
         try (
             WM3_MC_BuildFromNode morphMod ch nd
             WM3_MC_SetName morphMod ch nd.name
@@ -1107,6 +1216,7 @@ fn buildAndWireMorphs meshNode targets label = (
             if failedL <= 12 then logf ("wireFail " + label + " " + nd.name + " " + (getCurrentException()))
         )
     )
+    try ( logf ("morpher " + label + " numChannels=" + ((WM3_NumberOfChannels morphMod) as string)) ) catch ()
     #(wiredL, failedL)
 )
 
@@ -1192,17 +1302,25 @@ failed = 0
 faceWired = 0
 teethWired = 0
 salivaWired = 0
-for j = 1 to mh2max_morphMeshJobs.count do (
-    local job = mh2max_morphMeshJobs[j]
-    local label = job[3]
-    local pct = 60 + ((j * 10) / mh2max_morphMeshJobs.count)
-    mh2max_prog pct ("装配 " + label + " Morpher…")
-    local res = buildAndWireMorphs morphBuckets[j][1] morphBuckets[j][2] label
-    wired += res[1]
-    failed += res[2]
-    if label == "face" then faceWired = res[1]
-    else if label == "teeth" then teethWired = res[1]
-    else if label == "saliva" then salivaWired = res[1]
+try (
+    for j = 1 to mh2max_morphMeshJobs.count do (
+        local job = mh2max_morphMeshJobs[j]
+        local label = job[3]
+        local pct = 60 + ((j * 10) / mh2max_morphMeshJobs.count)
+        mh2max_prog pct ("装配 " + label + " Morpher…")
+        if j > morphBuckets.count then (
+            logf ("WARN morph bucket missing for " + label)
+            continue
+        )
+        local res = buildAndWireMorphs morphBuckets[j][1] morphBuckets[j][2] label
+        wired += res[1]
+        failed += res[2]
+        if label == "face" then faceWired = res[1]
+        else if label == "teeth" then teethWired = res[1]
+        else if label == "saliva" then salivaWired = res[1]
+    )
+) catch (
+    logf ("WARN morph wiring failed: " + (getCurrentException() as string))
 )
 logf ("wired=" + (wired as string) + " failed=" + (failed as string) +
     " (face=" + (faceWired as string) +
@@ -1535,6 +1653,9 @@ if head != undefined then (
 -- Bones on layer (imported, hidden for clean viewport — still in scene)
 bn = hideBonesSilent()
 logf ("bones on SkeletonBones layer, hidden=" + (bn as string))
+
+-- Body controllers: FBX only (no Max-side constraint rewire)
+try ( wireBodyLinksFromFile() ) catch ( logf ("body wire FAIL " + (getCurrentException() as string)) )
 
 -- Freeze face GUI frames / labels; CTRL knobs stay draggable
 mh2max_prog 88 "冻结 GUI / 安装限位钳制…"
